@@ -1,0 +1,5 @@
+node_modules/
+sync-state.json
+tokens.json
+*.xpi
+web-ext-artifacts/
