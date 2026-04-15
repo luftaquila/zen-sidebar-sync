@@ -107,10 +107,19 @@ this.zenInternals = class extends ExtensionAPI {
             if (!tab) return { success: false, error: "Tab not found" };
 
             if (options.essential) {
-              tab.zenEssential = true;
+              if (win.gZenPinnedTabManager) {
+                win.gZenPinnedTabManager.addToEssentials(tab);
+              } else {
+                tab.setAttribute("zen-essential", "true");
+              }
             }
+
             if (options.workspaceUuid) {
-              tab.zenWorkspace = options.workspaceUuid;
+              if (win.gZenWorkspaces) {
+                win.gZenWorkspaces.moveTabToWorkspace(tab, options.workspaceUuid);
+              } else {
+                tab.setAttribute("zen-workspace-id", options.workspaceUuid);
+              }
             }
 
             return { success: true };
