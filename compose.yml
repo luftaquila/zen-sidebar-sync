@@ -1,0 +1,17 @@
+services:
+  zen-sync:
+    image: ghcr.io/luftaquila/zen-sidebar-sync:latest
+    container_name: zen-sync
+    security_opt:
+      - label:disable
+    volumes:
+      - /srv/zen-sidebar-sync:/data
+    environment:
+      - PORT=9223
+    restart: unless-stopped
+    networks:
+      - traefik
+
+networks:
+  traefik:
+    external: true
