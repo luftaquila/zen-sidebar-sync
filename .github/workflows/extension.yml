@@ -1,0 +1,26 @@
+name: Build extension
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'extension/**'
+      - '.github/workflows/extension.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Build xpi
+        run: |
+          cd extension
+          zip -r ../zen-sidebar-sync.xpi . -x "*.DS_Store"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: zen-sidebar-sync
+          path: zen-sidebar-sync.xpi
+          retention-days: 90
