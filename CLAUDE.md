@@ -19,7 +19,7 @@ Zen Browser sidebar sync extension + WebSocket sync server. Syncs essentials, wo
     - `install.sh` — Linux/macOS installer
     - `install.ps1` — Windows installer (PowerShell, registers in Windows Registry)
   - `experiments/zenInternals/` — WebExtension experiment API (chrome-context access)
-    - `api.js` — accesses `gZenFolders`, `gZenWorkspaces`, `gBrowser.tabs` for folder/workspace operations
+    - `api.js` — accesses `gZenFolders`, `gZenWorkspaces`, `gBrowser.tabs` for folder/workspace operations; `organizeTab` sets `zenEssential`/`zenWorkspace` properties on tabs via `ExtensionParent.tabTracker`
     - `schema.json` — experiment API schema definition
     - Requires `extensions.experiments.enabled = true` in `about:config`
 - `server/` — Node.js WebSocket server (ESM, single file, `ws` library)
@@ -38,7 +38,7 @@ Zen Browser sidebar sync extension + WebSocket sync server. Syncs essentials, wo
 - Native data is cached for 5 seconds to avoid spawning Python on every tab event.
 - All workspaces from `zen-sessions.jsonlz4` are pre-populated before tab assignment, so empty workspaces are included in sync state.
 - Tab deduplication in both `applyState` and `applyPatch` uses `tabMonitor.state` (native host data, all workspaces) instead of `browser.tabs.query` (active workspace only). Using browser API for dedup causes duplicate tab creation for hidden workspace tabs.
-- Tab creation sets `zen-essential` and `zen-workspace-id` session values so Zen recognizes essential/workspace membership.
+- Tab creation uses experiment API `organizeTab` to set `zenEssential`/`zenWorkspace` properties directly on the XUL tab element (chrome context). Falls back to `browser.sessions.setTabValue` if the experiment API is unavailable. The session API stores values in `extData` which Zen does not read — only the direct properties work.
 - Workspace syncIds are name-based (not Zen UUID) for cross-device consistency.
 - Folder data includes `tabUrls` array mapping folder → member tab URLs via `groupId`.
 - After every apply (state or patch), `captureFullState({ silent: true })` immediately recaptures browser state to prevent stale diffs triggering echo loops.

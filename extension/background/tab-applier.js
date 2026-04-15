@@ -2,7 +2,8 @@
  * Tab Applier - Applies remote state to local browser
  *
  * After every apply, recaptures tabMonitor state to prevent stale diffs.
- * Sets Zen session values (zen-essential, zen-workspace-id) on created tabs.
+ * Uses experiment API (chrome context) to set Zen internal tab properties
+ * (zenEssential, zenWorkspace). Falls back to browser.sessions API.
  */
 
 const ALLOWED_SCHEMES = ['http:', 'https:'];
@@ -64,10 +65,13 @@ class TabApplier {
           await this._createTab(ess.url, { pinned: true, essential: true });
           allLocalUrls.add(ess.url);
         } else {
-          // Ensure essential + pinned on visible tabs
+          // Ensure essential + pinned on existing visible tabs
           const locals = localByUrl.get(ess.url);
-          if (locals && locals[0] && !locals[0].pinned) {
-            await browser.tabs.update(locals[0].id, { pinned: true }).catch(() => {});
+          if (locals && locals[0]) {
+            if (!locals[0].pinned) {
+              await browser.tabs.update(locals[0].id, { pinned: true }).catch(() => {});
+            }
+            await this._organizeTab(locals[0].id, { essential: true });
           }
         }
       }
@@ -169,13 +173,12 @@ class TabApplier {
       case 'add_essential': {
         if (!isAllowedUrl(op.tab?.url)) break;
         if (allLocalUrls.has(op.tab.url)) {
-          // Tab exists (possibly in hidden workspace) — just update visible one if needed
           const existing = byUrl.get(op.tab.url);
-          if (existing && !existing.pinned) {
-            await browser.tabs.update(existing.id, { pinned: true }).catch(() => {});
-          }
           if (existing) {
-            await browser.sessions.setTabValue(existing.id, 'zen-essential', true).catch(() => {});
+            if (!existing.pinned) {
+              await browser.tabs.update(existing.id, { pinned: true }).catch(() => {});
+            }
+            await this._organizeTab(existing.id, { essential: true });
           }
           break;
         }
@@ -190,7 +193,7 @@ class TabApplier {
           if (!existing.pinned) {
             await browser.tabs.update(existing.id, { pinned: true }).catch(() => {});
           }
-          await browser.sessions.setTabValue(existing.id, 'zen-essential', true).catch(() => {});
+          await this._organizeTab(existing.id, { essential: true });
         }
         break;
       }
@@ -312,15 +315,29 @@ class TabApplier {
     }
   }
 
+  async _organizeTab(tabId, { essential = false, workspaceId = null } = {}) {
+    const opts = {};
+    if (essential) opts.essential = true;
+    if (workspaceId && workspaceId !== '__default__') opts.workspaceUuid = workspaceId;
+    if (Object.keys(opts).length === 0) return;
+
+    if (typeof browser.zenInternals !== 'undefined') {
+      await browser.zenInternals.organizeTab(tabId, opts).catch(() => {});
+    } else {
+      // Fallback: session API (stores in extData, may not be read by Zen)
+      if (essential) {
+        await browser.sessions.setTabValue(tabId, 'zen-essential', true).catch(() => {});
+      }
+      if (opts.workspaceUuid) {
+        await browser.sessions.setTabValue(tabId, 'zen-workspace-id', opts.workspaceUuid).catch(() => {});
+      }
+    }
+  }
+
   async _createTab(url, { pinned = false, essential = false, workspaceId = null } = {}) {
     try {
       const tab = await browser.tabs.create({ url, pinned, active: false });
-      if (essential) {
-        await browser.sessions.setTabValue(tab.id, 'zen-essential', true).catch(() => {});
-      }
-      if (workspaceId && workspaceId !== '__default__') {
-        await browser.sessions.setTabValue(tab.id, 'zen-workspace-id', workspaceId).catch(() => {});
-      }
+      await this._organizeTab(tab.id, { essential, workspaceId });
       return tab;
     } catch (err) {
       console.error(`[TabApplier] create failed: ${url}`, err);

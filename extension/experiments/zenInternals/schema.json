@@ -35,6 +35,27 @@
         "async": true,
         "description": "Get all Zen workspaces with their UUIDs and names",
         "parameters": []
+      },
+      {
+        "name": "organizeTab",
+        "type": "function",
+        "async": true,
+        "description": "Set essential/workspace on a tab via Zen internal properties",
+        "parameters": [
+          {
+            "name": "tabId",
+            "type": "integer",
+            "description": "WebExtension tab ID"
+          },
+          {
+            "name": "options",
+            "type": "object",
+            "properties": {
+              "essential": { "type": "boolean", "optional": true },
+              "workspaceUuid": { "type": "string", "optional": true }
+            }
+          }
+        ]
       }
     ]
   }

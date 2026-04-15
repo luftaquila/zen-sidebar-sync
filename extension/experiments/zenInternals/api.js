@@ -92,6 +92,32 @@ this.zenInternals = class extends ExtensionAPI {
             return [];
           }
         },
+
+        async organizeTab(tabId, options) {
+          const win = Services.wm.getMostRecentWindow("navigator:browser");
+          if (!win || !win.gBrowser) {
+            return { success: false, error: "Browser not available" };
+          }
+
+          try {
+            const { ExtensionParent } = ChromeUtils.importESModule(
+              "resource://gre/modules/ExtensionParent.sys.mjs"
+            );
+            const tab = ExtensionParent.apiManager.global.tabTracker.getTab(tabId);
+            if (!tab) return { success: false, error: "Tab not found" };
+
+            if (options.essential) {
+              tab.zenEssential = true;
+            }
+            if (options.workspaceUuid) {
+              tab.zenWorkspace = options.workspaceUuid;
+            }
+
+            return { success: true };
+          } catch (e) {
+            return { success: false, error: e.message };
+          }
+        },
       },
     };
   }
