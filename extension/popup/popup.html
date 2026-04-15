@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div class="container">
+    <header>
+      <div class="logo">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M4 4h16v16H4z"/>
+          <path d="M4 9h16"/>
+          <path d="M9 4v16"/>
+        </svg>
+        <h1>Zen Sidebar Sync</h1>
+      </div>
+      <div class="status-badge" id="statusBadge">
+        <span class="status-dot"></span>
+        <span class="status-text">Disconnected</span>
+      </div>
+    </header>
+
+    <!-- Sync control -->
+    <section class="section sync-section">
+      <div class="field field-inline">
+        <label>Sync</label>
+        <label class="toggle">
+          <input type="checkbox" id="syncToggle">
+          <span class="toggle-slider"></span>
+        </label>
+      </div>
+      <div class="field field-inline">
+        <label>Last Sync</label>
+        <span id="lastSync" class="field-value">-</span>
+      </div>
+    </section>
+
+    <!-- Config -->
+    <section id="configSection" class="section">
+      <div class="field">
+        <label for="serverUrl">Server URL</label>
+        <input type="text" id="serverUrl" placeholder="ws://localhost:9223" spellcheck="false">
+      </div>
+      <div class="field">
+        <label for="syncToken">Sync Token</label>
+        <input type="password" id="syncToken" placeholder="Paste your sync token" spellcheck="false">
+      </div>
+      <div class="field">
+        <label for="deviceName">Device Name</label>
+        <input type="text" id="deviceName" placeholder="My MacBook" spellcheck="false">
+      </div>
+    </section>
+
+    <!-- Connected Info -->
+    <section id="infoSection" class="section hidden">
+      <div class="stats">
+        <div class="stat">
+          <span class="stat-value" id="essentialCount">0</span>
+          <span class="stat-label">Essentials</span>
+        </div>
+        <div class="stat">
+          <span class="stat-value" id="workspaceCount">0</span>
+          <span class="stat-label">Workspaces</span>
+        </div>
+        <div class="stat">
+          <span class="stat-value" id="tabCount">0</span>
+          <span class="stat-label">Tabs</span>
+        </div>
+      </div>
+
+      <div class="actions">
+        <button id="forcePushBtn" class="btn secondary" title="Push local state to server">
+          Force Push
+        </button>
+        <button id="forcePullBtn" class="btn secondary" title="Pull server state to local">
+          Force Pull
+        </button>
+      </div>
+    </section>
+  </div>
+
+  <script src="popup.js" type="module"></script>
+</body>
+</html>

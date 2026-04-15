@@ -1,0 +1,41 @@
+[
+  {
+    "namespace": "zenInternals",
+    "description": "Access Zen Browser internal APIs for workspace/folder management",
+    "functions": [
+      {
+        "name": "createFolder",
+        "type": "function",
+        "async": true,
+        "description": "Create a Zen folder in the sidebar",
+        "parameters": [
+          {
+            "name": "options",
+            "type": "object",
+            "properties": {
+              "name": { "type": "string", "description": "Folder name" },
+              "collapsed": { "type": "boolean", "optional": true },
+              "userIcon": { "type": "string", "optional": true },
+              "workspaceName": { "type": "string", "optional": true, "description": "Target workspace name" },
+              "tabUrls": { "type": "array", "optional": true, "items": { "type": "string" }, "description": "URLs of tabs to include in the folder" }
+            }
+          }
+        ]
+      },
+      {
+        "name": "getFolders",
+        "type": "function",
+        "async": true,
+        "description": "Get all Zen folders",
+        "parameters": []
+      },
+      {
+        "name": "getWorkspaces",
+        "type": "function",
+        "async": true,
+        "description": "Get all Zen workspaces with their UUIDs and names",
+        "parameters": []
+      }
+    ]
+  }
+]

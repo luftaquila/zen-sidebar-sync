@@ -1,0 +1,50 @@
+{
+  "manifest_version": 2,
+  "name": "Zen Sidebar Sync",
+  "version": "1.0.0",
+  "description": "Real-time sidebar sync for Zen Browser — essentials, workspaces, and open tabs across devices",
+  "author": "luftaquila",
+
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "zen-sidebar-sync@luftaquila",
+      "strict_min_version": "115.0"
+    }
+  },
+
+  "permissions": [
+    "tabs",
+    "sessions",
+    "storage",
+    "nativeMessaging"
+  ],
+
+  "background": {
+    "page": "background/background.html"
+  },
+
+  "browser_action": {
+    "default_popup": "popup/popup.html",
+    "default_icon": {
+      "48": "icons/icon-48.svg",
+      "96": "icons/icon-96.svg"
+    },
+    "default_title": "Zen Sidebar Sync"
+  },
+
+  "icons": {
+    "48": "icons/icon-48.svg",
+    "96": "icons/icon-96.svg"
+  },
+
+  "experiment_apis": {
+    "zenInternals": {
+      "schema": "experiments/zenInternals/schema.json",
+      "parent": {
+        "scopes": ["addon_parent"],
+        "paths": [["zenInternals"]],
+        "script": "experiments/zenInternals/api.js"
+      }
+    }
+  }
+}
