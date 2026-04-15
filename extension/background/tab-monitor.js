@@ -25,6 +25,11 @@ class TabMonitor {
     this._nativeData = null;
     this._nativeLastFetch = 0;
     this._nativeAvailable = null; // null=unknown, true/false after first try
+
+    // Experiment API cache
+    this._experimentData = null;
+    this._experimentLastFetch = 0;
+    this._experimentAvailable = null;
   }
 
   async init() {
@@ -88,6 +93,40 @@ class TabMonitor {
     return null;
   }
 
+  // --- Experiment API (chrome context) ---
+
+  async _getExperimentData() {
+    if (this._experimentAvailable === false) return null;
+
+    const now = Date.now();
+    if (this._experimentData && (now - this._experimentLastFetch) < NATIVE_CACHE_TTL) {
+      return this._experimentData;
+    }
+
+    try {
+      if (typeof browser.zenInternals === 'undefined') {
+        this._experimentAvailable = false;
+        return null;
+      }
+      const data = await browser.zenInternals.getTabData();
+      if (data && data.tabs && data.tabs.length > 0) {
+        this._experimentData = data;
+        this._experimentLastFetch = now;
+        if (this._experimentAvailable === null) {
+          console.log('[TabMonitor] Experiment API (zenInternals.getTabData) connected');
+        }
+        this._experimentAvailable = true;
+        return this._experimentData;
+      }
+    } catch (e) {
+      if (this._experimentAvailable === null) {
+        console.warn('[TabMonitor] Experiment API unavailable:', e.message);
+      }
+    }
+    this._experimentAvailable = false;
+    return null;
+  }
+
   // --- State Capture ---
 
   /**
@@ -97,13 +136,18 @@ class TabMonitor {
    */
   async captureFullState({ silent = false } = {}) {
     try {
-      const nativeData = await this._getNativeData();
-
+      // Priority: experiment API > native host > browser.tabs fallback
       let newState;
-      if (nativeData && nativeData.tabs && nativeData.tabs.length > 0) {
-        newState = await this._buildFromNative(nativeData);
+      const experimentData = await this._getExperimentData();
+      if (experimentData && experimentData.tabs && experimentData.tabs.length > 0) {
+        newState = await this._buildFromNative(experimentData);
       } else {
-        newState = await this._buildFromBrowserApi();
+        const nativeData = await this._getNativeData();
+        if (nativeData && nativeData.tabs && nativeData.tabs.length > 0) {
+          newState = await this._buildFromNative(nativeData);
+        } else {
+          newState = await this._buildFromBrowserApi();
+        }
       }
 
       const patch = this._computePatch(this.state, newState);
@@ -314,9 +358,25 @@ class TabMonitor {
     return newState;
   }
 
-  // --- Fallback: browser.sessions API ---
-
   async _enrichWorkspaceNames(workspaces) {
+    // Try experiment API first (chrome context, reads gZenWorkspaces directly)
+    try {
+      if (typeof browser.zenInternals !== 'undefined') {
+        const zenWorkspaces = await browser.zenInternals.getWorkspaces();
+        if (zenWorkspaces && zenWorkspaces.length > 0) {
+          for (const zenWs of zenWorkspaces) {
+            const ws = workspaces.find(w => w._zenUuid === zenWs.uuid);
+            if (ws) {
+              ws.name = zenWs.name || ws.name;
+              ws.icon = zenWs.icon || ws.icon;
+            }
+          }
+          return;
+        }
+      }
+    } catch {}
+
+    // Fallback: browser.sessions API (reads from extData, may not work)
     try {
       const windows = await browser.windows.getAll();
       const wsDataList = await Promise.all(

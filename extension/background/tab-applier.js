@@ -106,10 +106,8 @@ class TabApplier {
         }
       }
 
-      // 3. Folder restoration disabled — experiment API DOM selectors
-      // (zen-folder, f.label) are unverified and cause duplicate folders.
-      // TODO: enable after verifying Zen's actual DOM structure in browser.
-      // await this._applyFolders(remoteState.folders || []);
+      // 3. Folder restoration
+      await this._applyFolders(remoteState.folders || []);
 
       // 4. Remove tabs not in remote state
       if (!addOnly) {

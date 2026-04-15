@@ -40,7 +40,7 @@
         "name": "organizeTab",
         "type": "function",
         "async": true,
-        "description": "Set essential/workspace on a tab via Zen internal properties",
+        "description": "Set essential/workspace on a tab via Zen internal APIs",
         "parameters": [
           {
             "name": "tabId",
@@ -56,6 +56,13 @@
             }
           }
         ]
+      },
+      {
+        "name": "getTabData",
+        "type": "function",
+        "async": true,
+        "description": "Read all tab zen-essential and zen-workspace-id attributes from chrome context",
+        "parameters": []
       }
     ]
   }

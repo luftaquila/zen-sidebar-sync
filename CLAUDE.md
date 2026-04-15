@@ -9,7 +9,7 @@ Zen Browser sidebar sync extension + WebSocket sync server. Syncs essentials, wo
 - `extension/` — Firefox WebExtension (Manifest V2, targets Zen Browser / Gecko 115+)
   - `background/` — ES modules loaded via background page
     - `main.js` — orchestrator, wires TabMonitor ↔ SyncClient ↔ TabApplier
-    - `tab-monitor.js` — captures browser tab state via native messaging, computes diffs
+    - `tab-monitor.js` — captures browser tab state (experiment API > native host > browser API), computes diffs
     - `sync-client.js` — WebSocket client with reconnect/auth
     - `tab-applier.js` — applies remote state to local browser (additive on initial, full reconciliation after)
   - `popup/` — settings UI (vanilla HTML/CSS/JS)
@@ -19,8 +19,8 @@ Zen Browser sidebar sync extension + WebSocket sync server. Syncs essentials, wo
     - `install.sh` — Linux/macOS installer
     - `install.ps1` — Windows installer (PowerShell, registers in Windows Registry)
   - `experiments/zenInternals/` — WebExtension experiment API (chrome-context access)
-    - `api.js` — accesses `gZenFolders`, `gZenWorkspaces`, `gZenPinnedTabManager`, `gBrowser.tabs`; `organizeTab` uses `addToEssentials`/`moveTabToWorkspace` via `ExtensionParent.tabTracker`
-    - `schema.json` — experiment API schema definition
+    - `api.js` — `createFolder` (with `label`, `workspaceId`, `setFolderUserIcon`), `getFolders` (DOM `zen-folder` query), `getWorkspaces`, `organizeTab` (`addToEssentials`/`moveTabToWorkspace` via `ExtensionParent.tabTracker`), `getTabData` (all tabs with `zen-essential`/`zen-workspace-id` attributes from chrome context)
+    - `schema.json` — experiment API schema definition (5 functions)
     - Requires `extensions.experiments.enabled = true` in `about:config`
 - `server/` — Node.js WebSocket server (ESM, single file, `ws` library)
   - Stores state in `sync-state.json`, token hashes in `tokens.json` under `DATA_DIR` (default: `__dirname`)
@@ -34,11 +34,13 @@ Zen Browser sidebar sync extension + WebSocket sync server. Syncs essentials, wo
 - Initial connect merges additively (never closes local tabs on first sync).
 - After initial sync, all changes propagate bidirectionally including tab closes.
 - Empty remote state triggers addOnly mode to prevent accidental mass tab deletion.
-- **Native messaging host** reads Zen's internal session store files because `browser.tabs.query({})` in Zen 1.8b+ only returns active workspace tabs — hidden workspace tabs are invisible to WebExtension API. The host reads `recovery.jsonlz4` (per-tab zenWorkspace/zenEssential/groupId) and `zen-sessions.jsonlz4` (workspace definitions, groups, folders). Falls back to browser.sessions API if native host is unavailable (limited to active workspace only).
-- Native data is cached for 5 seconds to avoid spawning Python on every tab event.
+- **Tab state data source priority**: (1) Experiment API `getTabData` — reads all tab DOM attributes (`zen-essential`, `zen-workspace-id`) and workspaces directly from chrome context via `gBrowser.tabs`. (2) Native messaging host — reads `recovery.jsonlz4` and `zen-sessions.jsonlz4` session store files. (3) `browser.tabs.query` + `browser.sessions` fallback — limited to active workspace only.
+- `browser.tabs.query({})` in Zen 1.8b+ only returns active workspace tabs — hidden workspace tabs are invisible to WebExtension API. Experiment API and native host both see all workspaces.
+- Both experiment and native data are cached for 5 seconds to avoid repeated calls on every tab event.
 - All workspaces from `zen-sessions.jsonlz4` are pre-populated before tab assignment, so empty workspaces are included in sync state.
 - Tab deduplication in both `applyState` and `applyPatch` uses `tabMonitor.state` (native host data, all workspaces) instead of `browser.tabs.query` (active workspace only). Using browser API for dedup causes duplicate tab creation for hidden workspace tabs.
 - Tab creation uses experiment API `organizeTab` which calls `gZenPinnedTabManager.addToEssentials(tab)` for essentials and `gZenWorkspaces.moveTabToWorkspace(tab, uuid)` for workspace assignment. These are Zen's internal APIs that handle DOM container moves, UI updates, and event dispatch. Falls back to `browser.sessions.setTabValue` if experiment API unavailable (stores in `extData`, not read by Zen). DOM attributes are kebab-case (`zen-essential`, `zen-workspace-id`), session store serializes as camelCase (`zenEssential`, `zenWorkspace`).
+- Folder restoration uses experiment API `createFolder` with verified Zen API: `gZenFolders.createFolder(tabElements, { label, collapsed, workspaceId })` and `gZenFolders.setFolderUserIcon(folder, icon)`. Deduplicates by folder name.
 - Workspace syncIds are name-based (not Zen UUID) for cross-device consistency.
 - Folder data includes `tabUrls` array mapping folder → member tab URLs via `groupId`.
 - After every apply (state or patch), `captureFullState({ silent: true })` immediately recaptures browser state to prevent stale diffs triggering echo loops.
@@ -53,9 +55,8 @@ Zen Browser sidebar sync extension + WebSocket sync server. Syncs essentials, wo
 
 ## Known limitations
 
-- **Folder restoration disabled**: The experiment API's `createFolder` and `getFolders` use DOM selectors (`zen-folder`, `f.label`) that have not been verified against actual Zen Browser DOM. Folder data is captured and synced, but restoration on receiving devices is disabled until the DOM selectors are tested in a real browser.
 - **Hidden workspace tab removal**: `applyState` step 4 (remove tabs not in remote state) only removes active workspace tabs because `browser.tabs.query` doesn't return hidden ones. Tabs removed from remote state in hidden workspaces become zombies until that workspace is activated.
-- **Fallback mode limitations**: Without the native messaging host, only active workspace tabs are visible. Workspace detection falls back to `browser.sessions` API which may return UUIDs instead of names.
+- **Fallback mode limitations**: Without experiment API or native messaging host, only active workspace tabs are visible. Workspace detection falls back to `browser.sessions` API which may return UUIDs instead of names.
 
 ## Commands
 
@@ -84,4 +85,4 @@ podman exec zen-sync sh -c 'echo "{\"essentials\":[],\"workspaces\":[],\"groups\
 - Extension code uses `browser.*` APIs (Firefox WebExtension).
 - Server uses Node.js ESM (`"type": "module"`).
 - No build step for the extension — plain ES modules.
-- Experiment API code runs in chrome context (privileged), can access `gBrowser`, `gZenFolders`, `gZenWorkspaces`, `Services.*`.
+- Experiment API code runs in chrome context (privileged), can access `gBrowser`, `gZenFolders`, `gZenWorkspaces`, `gZenPinnedTabManager`, `Services.*`.
