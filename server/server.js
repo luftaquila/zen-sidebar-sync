@@ -412,6 +412,30 @@ function applyPatch(state, patch) {
         }
         break;
       }
+
+      case 'add_folder':
+        if (op.folder?.syncId
+            && !(state.folders || []).some(f => f.syncId === op.folder.syncId)
+            && !(state.folders || []).some(f => f.name === op.folder.name)) {
+          (state.folders ??= []).push(op.folder);
+        }
+        break;
+
+      case 'remove_folder':
+        state.folders = (state.folders || []).filter(f => f.syncId !== op.syncId);
+        break;
+
+      case 'update_folder': {
+        const folder = (state.folders || []).find(f => f.syncId === op.syncId);
+        if (folder && op.changes) {
+          if (op.changes.name !== undefined) folder.name = op.changes.name;
+          if (op.changes.collapsed !== undefined) folder.collapsed = op.changes.collapsed;
+          if (op.changes.userIcon !== undefined) folder.userIcon = op.changes.userIcon;
+          if (op.changes.workspaceName !== undefined) folder.workspaceName = op.changes.workspaceName;
+          if (op.changes.tabUrls !== undefined) folder.tabUrls = op.changes.tabUrls;
+        }
+        break;
+      }
     }
   }
 }

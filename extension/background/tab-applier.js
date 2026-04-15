@@ -76,9 +76,9 @@ class TabApplier {
         }
       }
 
-      // 2. Workspace tabs
+      // 2. Workspace tabs — create missing workspaces first
       for (const ws of (remoteState.workspaces || [])) {
-        const wsUuid = this.tabMonitor.workspaceUuidMap.get(ws.name);
+        const wsUuid = await this._ensureWorkspace(ws.name, ws.icon);
 
         for (const tab of (ws.pinnedTabs || [])) {
           if (!isAllowedUrl(tab.url)) continue;
@@ -106,8 +106,8 @@ class TabApplier {
         }
       }
 
-      // 3. Folder restoration
-      await this._applyFolders(remoteState.folders || []);
+      // 3. Folder sync (add, update, remove)
+      await this._applyFolders(remoteState.folders || [], { addOnly });
 
       // 4. Remove tabs not in remote state
       if (!addOnly) {
@@ -204,6 +204,9 @@ class TabApplier {
             await browser.tabs.remove(tab.id).catch(() => {});
             byUrl.delete(op.url);
           }
+          // Remove from allLocalUrls so subsequent add_tab for same URL
+          // can re-create it (e.g. pin toggle: remove from pinnedTabs + add to tabs)
+          allLocalUrls.delete(op.url);
         }
         break;
       }
@@ -216,6 +219,8 @@ class TabApplier {
             await browser.tabs.update(tab.id, { url: op.changes.url }).catch(() => {});
             byUrl.delete(op.oldUrl);
             byUrl.set(op.changes.url, tab);
+            allLocalUrls.delete(op.oldUrl);
+            allLocalUrls.add(op.changes.url);
           }
         }
         break;
@@ -224,9 +229,7 @@ class TabApplier {
       case 'add_tab': {
         if (!isAllowedUrl(op.tab?.url)) break;
         if (allLocalUrls.has(op.tab.url)) break;
-        const wsUuid = op.workspaceName
-          ? this.tabMonitor.workspaceUuidMap.get(op.workspaceName)
-          : null;
+        const wsUuid = await this._ensureWorkspace(op.workspaceName);
         const tab = await this._createTab(op.tab.url, {
           pinned: op.pinned || false,
           workspaceId: wsUuid,
@@ -240,7 +243,7 @@ class TabApplier {
 
       case 'add_workspace': {
         if (!op.workspace) break;
-        const wsUuid2 = this.tabMonitor.workspaceUuidMap.get(op.workspace.name);
+        const wsUuid2 = await this._ensureWorkspace(op.workspace.name, op.workspace.icon);
         for (const tab of (op.workspace.pinnedTabs || [])) {
           if (isAllowedUrl(tab.url) && !allLocalUrls.has(tab.url)) {
             const created = await this._createTab(tab.url, { pinned: true, workspaceId: wsUuid2 });
@@ -270,48 +273,147 @@ class TabApplier {
             if (local) {
               await browser.tabs.remove(local.id).catch(() => {});
               byUrl.delete(tab.url);
+              allLocalUrls.delete(tab.url);
             }
           }
         }
         break;
       }
+
+      // --- Folder patch operations ---
+
+      case 'add_folder': {
+        if (!op.folder?.name) break;
+        if (typeof browser.zenInternals === 'undefined') break;
+        try {
+          const localFolders = await browser.zenInternals.getFolders();
+          if (localFolders.some(f => f.name === op.folder.name)) break;
+          await browser.zenInternals.createFolder({
+            name: op.folder.name,
+            collapsed: op.folder.collapsed || false,
+            userIcon: op.folder.userIcon || '',
+            workspaceName: op.folder.workspaceName || '',
+            tabUrls: op.folder.tabUrls || [],
+          });
+        } catch (e) {
+          console.warn('[TabApplier] add_folder error:', e.message);
+        }
+        break;
+      }
+
+      case 'remove_folder': {
+        if (!op.folder?.name) break;
+        if (typeof browser.zenInternals === 'undefined') break;
+        await browser.zenInternals.removeFolder({ name: op.folder.name }).catch(() => {});
+        break;
+      }
+
+      case 'update_folder': {
+        if (!op.oldName) break;
+        if (typeof browser.zenInternals === 'undefined') break;
+        await browser.zenInternals.updateFolder({
+          currentName: op.oldName,
+          name: op.changes?.name,
+          collapsed: op.changes?.collapsed,
+          icon: op.changes?.userIcon,
+        }).catch(() => {});
+        break;
+      }
     }
   }
 
-  async _applyFolders(remoteFolders) {
-    if (!remoteFolders || remoteFolders.length === 0) return;
+  // --- Folder sync (full state) ---
+
+  async _applyFolders(remoteFolders, { addOnly = false } = {}) {
+    if (typeof browser.zenInternals === 'undefined') {
+      if (remoteFolders.length > 0) {
+        console.warn('[TabApplier] zenInternals not available — folder sync skipped');
+      }
+      return;
+    }
 
     try {
-      if (typeof browser.zenInternals === 'undefined') {
-        console.warn('[TabApplier] zenInternals experiment API not available — folder sync skipped');
-        return;
+      const localFolders = await browser.zenInternals.getFolders();
+      const localByName = new Map(localFolders.map(f => [f.name, f]));
+      const remoteNames = new Set();
+
+      // Add missing folders and update existing ones
+      for (const folder of remoteFolders) {
+        if (!folder.name) continue;
+        remoteNames.add(folder.name);
+        const local = localByName.get(folder.name);
+
+        if (!local) {
+          // Create new folder
+          const result = await browser.zenInternals.createFolder({
+            name: folder.name,
+            collapsed: folder.collapsed || false,
+            userIcon: folder.userIcon || '',
+            workspaceName: folder.workspaceName || '',
+            tabUrls: folder.tabUrls || [],
+          });
+          if (!result.success) {
+            console.warn(`[TabApplier] createFolder failed: ${folder.name}`, result.error);
+          }
+        } else {
+          // Update existing folder if properties differ
+          const needsUpdate =
+            local.collapsed !== (folder.collapsed || false) ||
+            local.iconURL !== (folder.userIcon || '');
+
+          if (needsUpdate) {
+            await browser.zenInternals.updateFolder({
+              currentName: folder.name,
+              collapsed: folder.collapsed || false,
+              icon: folder.userIcon || null,
+            }).catch(() => {});
+          }
+        }
       }
 
-      // Get existing local folders to avoid duplicates
-      const localFolders = await browser.zenInternals.getFolders();
-      const localNames = new Set(localFolders.map(f => f.name));
-
-      for (const folder of remoteFolders) {
-        if (!folder.name || localNames.has(folder.name)) continue;
-
-        const result = await browser.zenInternals.createFolder({
-          name: folder.name,
-          collapsed: folder.collapsed || false,
-          userIcon: folder.userIcon || '',
-          workspaceName: folder.workspaceName || '',
-          tabUrls: folder.tabUrls || [],
-        });
-
-        if (result.success) {
-          localNames.add(folder.name);
-        } else {
-          console.warn(`[TabApplier] createFolder failed: ${folder.name}`, result.error);
+      // Remove local folders not in remote state (only on full sync, not addOnly)
+      if (!addOnly) {
+        for (const [name] of localByName) {
+          if (!remoteNames.has(name)) {
+            await browser.zenInternals.removeFolder({ name }).catch(() => {});
+          }
         }
       }
     } catch (e) {
       console.warn('[TabApplier] folder apply error:', e.message);
     }
   }
+
+  // --- Workspace creation ---
+
+  /**
+   * Ensure workspace exists locally, creating if necessary.
+   * Returns the local Zen UUID or null.
+   */
+  async _ensureWorkspace(name, icon = '') {
+    if (!name || name === 'Default') {
+      return this.tabMonitor.workspaceUuidMap.get(name) || null;
+    }
+
+    const existing = this.tabMonitor.workspaceUuidMap.get(name);
+    if (existing) return existing;
+
+    // Try to create via experiment API
+    if (typeof browser.zenInternals !== 'undefined') {
+      try {
+        const result = await browser.zenInternals.createWorkspace({ name, icon });
+        if (result.success && result.uuid) {
+          this.tabMonitor.workspaceUuidMap.set(name, result.uuid);
+          return result.uuid;
+        }
+      } catch (e) {
+        console.warn(`[TabApplier] createWorkspace failed: ${name}`, e.message);
+      }
+    }
+    return null;
+  }
+
+  // --- Tab organization ---
 
   async _organizeTab(tabId, { essential = false, workspaceId = null } = {}) {
     const opts = {};

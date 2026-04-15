@@ -173,9 +173,109 @@ this.zenInternals = class extends ExtensionAPI {
               }));
             }
 
-            return { tabs, workspaces };
+            // Ref: zen-browser/desktop src/zen/folders/ZenFolders.mjs storeDataForSessionStore()
+            let folders = [];
+            const folderElements = win.gBrowser.tabContainer.querySelectorAll("zen-folder");
+            for (const f of folderElements) {
+              const tabUrls = [];
+              if (f.tabs) {
+                for (const tab of f.tabs) {
+                  try {
+                    const url = tab.linkedBrowser?.currentURI?.spec;
+                    if (url && (url.startsWith("http://") || url.startsWith("https://"))) {
+                      tabUrls.push(url);
+                    }
+                  } catch (e) {}
+                }
+              }
+              // Walk up DOM to find parent folder
+              const parentFolder = f.parentElement?.closest?.("zen-folder");
+              folders.push({
+                id: f.id,
+                name: f.label || "",
+                collapsed: f.collapsed || false,
+                userIcon: f.iconURL || "",
+                workspaceId: f.getAttribute("zen-workspace-id") || "",
+                isLiveFolder: f.isLiveFolder || false,
+                parentId: parentFolder ? parentFolder.id : null,
+                tabUrls,
+              });
+            }
+
+            return { tabs, workspaces, folders };
           } catch (e) {
-            return { tabs: [], workspaces: [] };
+            return { tabs: [], workspaces: [], folders: [] };
+          }
+        },
+
+        // Ref: zen-browser/desktop src/zen/spaces/ZenSpaceCreation.mjs
+        // saveWorkspace() creates or updates a workspace in Zen's storage.
+        async createWorkspace(options) {
+          const win = Services.wm.getMostRecentWindow("navigator:browser");
+          if (!win || !win.gZenWorkspaces) {
+            return { success: false, error: "Zen workspaces API not available" };
+          }
+
+          try {
+            const uuid = Services.uuid.generateUUID().toString().replace(/[{}]/g, "");
+            await win.gZenWorkspaces.saveWorkspace({
+              uuid,
+              name: options.name || "New Workspace",
+              icon: options.icon || undefined,
+            });
+            return { success: true, uuid };
+          } catch (e) {
+            return { success: false, error: e.message };
+          }
+        },
+
+        // Ref: zen-browser/desktop src/zen/folders/ZenFolder.mjs delete()
+        // Calls gBrowser.removeTabGroup — tabs are ungrouped, not closed.
+        async removeFolder(options) {
+          const win = Services.wm.getMostRecentWindow("navigator:browser");
+          if (!win) return { success: false, error: "Window not available" };
+
+          try {
+            const folders = win.gBrowser.tabContainer.querySelectorAll("zen-folder");
+            for (const f of folders) {
+              if (f.label === options.name) {
+                await f.delete();
+                return { success: true };
+              }
+            }
+            return { success: false, error: "Folder not found" };
+          } catch (e) {
+            return { success: false, error: e.message };
+          }
+        },
+
+        // Ref: zen-browser/desktop src/zen/folders/ZenFolder.mjs
+        // name setter fires ZenFolderRenamed event.
+        // collapsed is a direct property.
+        // Ref: zen-browser/desktop src/zen/folders/ZenFolders.mjs setFolderUserIcon()
+        async updateFolder(options) {
+          const win = Services.wm.getMostRecentWindow("navigator:browser");
+          if (!win) return { success: false, error: "Window not available" };
+
+          try {
+            const folders = win.gBrowser.tabContainer.querySelectorAll("zen-folder");
+            for (const f of folders) {
+              if (f.label === options.currentName) {
+                if (options.name !== undefined && options.name !== options.currentName) {
+                  f.name = options.name;
+                }
+                if (options.collapsed !== undefined) {
+                  f.collapsed = options.collapsed;
+                }
+                if (options.icon !== undefined && win.gZenFolders) {
+                  win.gZenFolders.setFolderUserIcon(f, options.icon || null);
+                }
+                return { success: true };
+              }
+            }
+            return { success: false, error: "Folder not found" };
+          } catch (e) {
+            return { success: false, error: e.message };
           }
         },
       },

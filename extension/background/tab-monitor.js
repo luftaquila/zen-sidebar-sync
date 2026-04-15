@@ -263,13 +263,30 @@ class TabMonitor {
       }
     }
 
+    // Build folder id → (name, wsName) for parent resolution
+    const folderIdToKey = new Map();
     for (const f of (nativeData.folders || [])) {
+      const wsName = wsUuidToName.get(f.workspaceId) || '';
+      folderIdToKey.set(f.id, { name: f.name || '', wsName });
+    }
+
+    for (const f of (nativeData.folders || [])) {
+      const wsName = wsUuidToName.get(f.workspaceId) || '';
+      // Name-based syncId for cross-device consistency (not device-local DOM id)
+      const syncId = this._makeSyncId('fld', `${f.name || ''}:${wsName}`);
+      let parentSyncId = null;
+      if (f.parentId) {
+        const parent = folderIdToKey.get(f.parentId);
+        if (parent) {
+          parentSyncId = this._makeSyncId('fld', `${parent.name}:${parent.wsName}`);
+        }
+      }
       newState.folders.push({
-        syncId: this._makeSyncId('fld', f.id),
+        syncId,
         name: f.name || '',
         collapsed: f.collapsed,
-        parentSyncId: f.parentId ? this._makeSyncId('fld', f.parentId) : null,
-        workspaceName: wsUuidToName.get(f.workspaceId) || '',
+        parentSyncId,
+        workspaceName: wsName,
         userIcon: f.userIcon || '',
         isLiveFolder: f.isLiveFolder,
         tabUrls: folderTabUrls.get(f.id) || [],
@@ -463,6 +480,36 @@ class TabMonitor {
     for (const ws of oldState.workspaces) {
       if (!newWsIds.has(ws.syncId)) {
         operations.push({ type: 'remove_workspace', syncId: ws.syncId, workspace: ws });
+      }
+    }
+
+    // Diff folders
+    const oldFldMap = new Map((oldState.folders || []).map(f => [f.syncId, f]));
+    const newFldIds = new Set((newState.folders || []).map(f => f.syncId));
+
+    for (const folder of (newState.folders || [])) {
+      const old = oldFldMap.get(folder.syncId);
+      if (!old) {
+        operations.push({ type: 'add_folder', folder });
+      } else if (old.name !== folder.name || old.collapsed !== folder.collapsed ||
+                 old.userIcon !== folder.userIcon) {
+        operations.push({
+          type: 'update_folder',
+          syncId: folder.syncId,
+          oldName: old.name,
+          changes: {
+            name: folder.name,
+            collapsed: folder.collapsed,
+            userIcon: folder.userIcon,
+            workspaceName: folder.workspaceName,
+            tabUrls: folder.tabUrls,
+          },
+        });
+      }
+    }
+    for (const folder of (oldState.folders || [])) {
+      if (!newFldIds.has(folder.syncId)) {
+        operations.push({ type: 'remove_folder', syncId: folder.syncId, folder });
       }
     }
 

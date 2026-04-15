@@ -19,8 +19,8 @@ Zen Browser sidebar sync extension + WebSocket sync server. Syncs essentials, wo
     - `install.sh` — Linux/macOS installer
     - `install.ps1` — Windows installer (PowerShell, registers in Windows Registry)
   - `experiments/zenInternals/` — WebExtension experiment API (chrome-context access)
-    - `api.js` — `createFolder` (with `label`, `workspaceId`, `setFolderUserIcon`), `getFolders` (DOM `zen-folder` query), `getWorkspaces`, `organizeTab` (`addToEssentials`/`moveTabToWorkspace` via `ExtensionParent.tabTracker`), `getTabData` (all tabs with `zen-essential`/`zen-workspace-id` attributes from chrome context)
-    - `schema.json` — experiment API schema definition (5 functions)
+    - `api.js` — `createFolder` (with `label`, `workspaceId`, `setFolderUserIcon`), `getFolders`, `getWorkspaces`, `organizeTab` (`addToEssentials`/`moveTabToWorkspace`), `getTabData` (tabs + workspaces + folders from chrome context), `createWorkspace` (`saveWorkspace`), `removeFolder` (`folder.delete()`), `updateFolder` (`folder.name`/`collapsed`/`setFolderUserIcon`)
+    - `schema.json` — experiment API schema definition (8 functions)
     - Requires `extensions.experiments.enabled = true` in `about:config`
 - `server/` — Node.js WebSocket server (ESM, single file, `ws` library)
   - Stores state in `sync-state.json`, token hashes in `tokens.json` under `DATA_DIR` (default: `__dirname`)
@@ -40,8 +40,9 @@ Zen Browser sidebar sync extension + WebSocket sync server. Syncs essentials, wo
 - All workspaces from `zen-sessions.jsonlz4` are pre-populated before tab assignment, so empty workspaces are included in sync state.
 - Tab deduplication in both `applyState` and `applyPatch` uses `tabMonitor.state` (native host data, all workspaces) instead of `browser.tabs.query` (active workspace only). Using browser API for dedup causes duplicate tab creation for hidden workspace tabs.
 - Tab creation uses experiment API `organizeTab` which calls `gZenPinnedTabManager.addToEssentials(tab)` for essentials and `gZenWorkspaces.moveTabToWorkspace(tab, uuid)` for workspace assignment. These are Zen's internal APIs that handle DOM container moves, UI updates, and event dispatch. Falls back to `browser.sessions.setTabValue` if experiment API unavailable (stores in `extData`, not read by Zen). DOM attributes are kebab-case (`zen-essential`, `zen-workspace-id`), session store serializes as camelCase (`zenEssential`, `zenWorkspace`).
-- Folder restoration uses experiment API `createFolder` with verified Zen API: `gZenFolders.createFolder(tabElements, { label, collapsed, workspaceId })` and `gZenFolders.setFolderUserIcon(folder, icon)`. Deduplicates by folder name.
-- Workspace syncIds are name-based (not Zen UUID) for cross-device consistency.
+- Folder sync is fully bidirectional: add (`createFolder`), remove (`folder.delete()` — ungroupstabs, doesn't close them), update (`folder.name`, `folder.collapsed`, `setFolderUserIcon`). Diff engine tracks `add_folder`/`remove_folder`/`update_folder` operations. Folder rename appears as remove+add (tabs are ungrouped then regrouped via tabUrls).
+- Workspace creation uses `gZenWorkspaces.saveWorkspace({ uuid, name, icon })` via experiment API. Missing workspaces are auto-created when receiving remote state (`_ensureWorkspace` helper). `Services.uuid.generateUUID()` for UUID generation.
+- Workspace syncIds are name-based (not Zen UUID) for cross-device consistency. Folder syncIds are also name+workspace based (`fld-hash(name:workspaceName)`) for cross-device matching.
 - Folder data includes `tabUrls` array mapping folder → member tab URLs via `groupId`.
 - After every apply (state or patch), `captureFullState({ silent: true })` immediately recaptures browser state to prevent stale diffs triggering echo loops.
 - `_applyingCount` counter guards against tab events during apply; recapture runs while guard is still held.
@@ -56,7 +57,8 @@ Zen Browser sidebar sync extension + WebSocket sync server. Syncs essentials, wo
 ## Known limitations
 
 - **Hidden workspace tab removal**: `applyState` step 4 (remove tabs not in remote state) only removes active workspace tabs because `browser.tabs.query` doesn't return hidden ones. Tabs removed from remote state in hidden workspaces become zombies until that workspace is activated.
-- **Fallback mode limitations**: Without experiment API or native messaging host, only active workspace tabs are visible. Workspace detection falls back to `browser.sessions` API which may return UUIDs instead of names.
+- **Fallback mode limitations**: Without experiment API or native messaging host, only active workspace tabs are visible. Workspace/folder creation and organization require experiment API — fallback mode can only sync tabs.
+- **Folder rename is remove+add**: Folder syncIds are name-based, so renaming a folder produces a remove_folder + add_folder pair. Tabs are ungrouped by `folder.delete()` then regrouped by `createFolder` via URL matching.
 
 ## Commands
 

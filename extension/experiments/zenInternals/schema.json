@@ -61,8 +61,57 @@
         "name": "getTabData",
         "type": "function",
         "async": true,
-        "description": "Read all tab zen-essential and zen-workspace-id attributes from chrome context",
+        "description": "Read all tabs, workspaces, and folders from chrome context",
         "parameters": []
+      },
+      {
+        "name": "createWorkspace",
+        "type": "function",
+        "async": true,
+        "description": "Create a Zen workspace via gZenWorkspaces.saveWorkspace()",
+        "parameters": [
+          {
+            "name": "options",
+            "type": "object",
+            "properties": {
+              "name": { "type": "string", "description": "Workspace name" },
+              "icon": { "type": "string", "optional": true }
+            }
+          }
+        ]
+      },
+      {
+        "name": "removeFolder",
+        "type": "function",
+        "async": true,
+        "description": "Remove a Zen folder by name via folder.delete()",
+        "parameters": [
+          {
+            "name": "options",
+            "type": "object",
+            "properties": {
+              "name": { "type": "string", "description": "Folder name to remove" }
+            }
+          }
+        ]
+      },
+      {
+        "name": "updateFolder",
+        "type": "function",
+        "async": true,
+        "description": "Update folder properties (name, collapsed, icon)",
+        "parameters": [
+          {
+            "name": "options",
+            "type": "object",
+            "properties": {
+              "currentName": { "type": "string", "description": "Current folder name to find" },
+              "name": { "type": "string", "optional": true, "description": "New folder name" },
+              "collapsed": { "type": "boolean", "optional": true },
+              "icon": { "type": "string", "optional": true }
+            }
+          }
+        ]
       }
     ]
   }
