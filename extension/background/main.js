@@ -64,22 +64,22 @@ function onLocalStateChange(state, patch) {
 async function onRemoteStateUpdate(remoteState, sourceDevice) {
   if (sourceDevice === syncClient.deviceId) return;
 
-  if (!initialSyncDone) {
-    const totalRemoteTabs = (remoteState.essentials || []).length
-      + (remoteState.workspaces || []).reduce(
-        (sum, ws) => sum + (ws.tabs || []).length + (ws.pinnedTabs || []).length, 0);
+  const totalRemoteTabs = (remoteState.essentials || []).length
+    + (remoteState.workspaces || []).reduce(
+      (sum, ws) => sum + (ws.tabs || []).length + (ws.pinnedTabs || []).length, 0);
 
-    if (totalRemoteTabs === 0) {
-      // Server is empty — push local state as seed
-      if (syncClient.isConnected && tabMonitor.state) {
-        syncClient.sendFullState(tabMonitor.state);
-      }
-    } else {
-      // Server has state — additive merge only
-      await tabApplier.applyState(remoteState, { addOnly: true });
+  if (totalRemoteTabs === 0) {
+    // Server is empty (first run or reset) — push local state as seed
+    if (syncClient.isConnected && tabMonitor.state) {
+      syncClient.sendFullState(tabMonitor.state);
     }
     initialSyncDone = true;
+  } else if (!initialSyncDone) {
+    // First connect, server has state — additive merge only
+    await tabApplier.applyState(remoteState, { addOnly: true });
+    initialSyncDone = true;
   } else {
+    // Ongoing sync — full reconciliation
     await tabApplier.applyState(remoteState, { addOnly: false });
   }
 
