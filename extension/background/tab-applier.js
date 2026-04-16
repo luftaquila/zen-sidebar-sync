@@ -67,6 +67,12 @@ class TabApplier {
         localByUrl.get(t.url).push(t);
       }
 
+      // Full-workspace URL → tabId map from experiment API (includes hidden workspaces)
+      const fullUrlToTabId = new Map();
+      for (const [tabId, info] of this.tabMonitor._tabIdToInfo) {
+        fullUrlToTabId.set(info.url, tabId);
+      }
+
       const remoteUrls = new Set();
       // Track URL → WebExtension tab ID for folder assignment
       const urlToTabId = new Map();
@@ -90,7 +96,7 @@ class TabApplier {
           if (tab) urlToTabId.set(ess.url, tab.id);
           allLocalUrls.add(ess.url);
         } else {
-          // Ensure essential + pinned on existing visible tabs
+          // Ensure essential + pinned on existing tabs (reorganize if in wrong category)
           const locals = localByUrl.get(ess.url);
           if (locals && locals[0]) {
             if (!locals[0].pinned) {
@@ -98,6 +104,14 @@ class TabApplier {
             }
             await this._organizeTab(locals[0].id, { essential: true });
             urlToTabId.set(ess.url, locals[0].id);
+          } else {
+            // Hidden workspace tab — promote to essential via experiment API tab ID
+            const hiddenTabId = fullUrlToTabId.get(ess.url);
+            if (hiddenTabId != null) {
+              await browser.tabs.update(hiddenTabId, { pinned: true }).catch(() => {});
+              await this._organizeTab(hiddenTabId, { essential: true });
+              urlToTabId.set(ess.url, hiddenTabId);
+            }
           }
         }
       }
@@ -115,12 +129,21 @@ class TabApplier {
             if (created) urlToTabId.set(tab.url, created.id);
             allLocalUrls.add(tab.url);
           } else {
+            // Existing tab — reorganize to this workspace (may be essential or different workspace)
             const locals = localByUrl.get(tab.url);
             if (locals && locals[0]) {
               if (!locals[0].pinned) {
                 await browser.tabs.update(locals[0].id, { pinned: true }).catch(() => {});
               }
+              await this._organizeTab(locals[0].id, { removeEssential: true, workspaceId: wsUuid });
               urlToTabId.set(tab.url, locals[0].id);
+            } else {
+              const hiddenTabId = fullUrlToTabId.get(tab.url);
+              if (hiddenTabId != null) {
+                await browser.tabs.update(hiddenTabId, { pinned: true }).catch(() => {});
+                await this._organizeTab(hiddenTabId, { removeEssential: true, workspaceId: wsUuid });
+                urlToTabId.set(tab.url, hiddenTabId);
+              }
             }
           }
         }
@@ -134,9 +157,21 @@ class TabApplier {
             if (created) urlToTabId.set(tab.url, created.id);
             allLocalUrls.add(tab.url);
           } else {
+            // Existing tab — reorganize to this workspace (may be essential or different workspace)
             const locals = localByUrl.get(tab.url);
             if (locals && locals[0]) {
+              if (locals[0].pinned) {
+                await browser.tabs.update(locals[0].id, { pinned: false }).catch(() => {});
+              }
+              await this._organizeTab(locals[0].id, { removeEssential: true, workspaceId: wsUuid });
               urlToTabId.set(tab.url, locals[0].id);
+            } else {
+              const hiddenTabId = fullUrlToTabId.get(tab.url);
+              if (hiddenTabId != null) {
+                await browser.tabs.update(hiddenTabId, { pinned: false }).catch(() => {});
+                await this._organizeTab(hiddenTabId, { removeEssential: true, workspaceId: wsUuid });
+                urlToTabId.set(tab.url, hiddenTabId);
+              }
             }
           }
         }
@@ -155,8 +190,8 @@ class TabApplier {
         }
 
         // Also remove hidden workspace tabs using experiment API tab IDs
-        for (const [tabId, info] of this.tabMonitor._tabIdToInfo) {
-          if (!remoteUrls.has(info.url)) {
+        for (const [url, tabId] of fullUrlToTabId) {
+          if (!remoteUrls.has(url)) {
             await browser.tabs.remove(tabId).catch(() => {});
           }
         }
