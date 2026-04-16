@@ -59,6 +59,17 @@ class TabMonitor {
     this.debounceTimer = setTimeout(() => this.captureFullState(), this.DEBOUNCE_MS);
   }
 
+  /**
+   * Invalidate experiment and native caches so the next captureFullState
+   * fetches fresh data. Called after apply operations.
+   */
+  invalidateCache() {
+    this._experimentData = null;
+    this._experimentLastFetch = 0;
+    this._nativeData = null;
+    this._nativeLastFetch = 0;
+  }
+
   // --- Native Messaging ---
 
   async _getNativeData() {
@@ -88,8 +99,10 @@ class TabMonitor {
         console.warn('[TabMonitor] Native messaging unavailable:', e.message);
         console.warn('[TabMonitor] Install the native host: extension/native/install.sh');
       }
+      this._nativeAvailable = false;
     }
-    this._nativeAvailable = false;
+    // Only mark unavailable on exception (connection failure).
+    // Empty data (resp.success but 0 tabs) is transient — don't disable permanently.
     return null;
   }
 
@@ -118,13 +131,16 @@ class TabMonitor {
         this._experimentAvailable = true;
         return this._experimentData;
       }
+      // API is available but returned empty data (e.g. browser startup).
+      // Don't mark as unavailable — it will work once tabs load.
+      return null;
     } catch (e) {
       if (this._experimentAvailable === null) {
         console.warn('[TabMonitor] Experiment API unavailable:', e.message);
       }
+      this._experimentAvailable = false;
+      return null;
     }
-    this._experimentAvailable = false;
-    return null;
   }
 
   // --- State Capture ---
@@ -429,6 +445,15 @@ class TabMonitor {
     return Math.abs(hash).toString(36);
   }
 
+  _arraysEqual(a, b) {
+    if (a === b) return true;
+    if (!a || !b) return false;
+    if (a.length !== b.length) return false;
+    const sa = [...a].sort();
+    const sb = [...b].sort();
+    return sa.every((v, i) => v === sb[i]);
+  }
+
   // --- Diff Engine ---
 
   _computePatch(oldState, newState) {
@@ -491,20 +516,27 @@ class TabMonitor {
       const old = oldFldMap.get(folder.syncId);
       if (!old) {
         operations.push({ type: 'add_folder', folder });
-      } else if (old.name !== folder.name || old.collapsed !== folder.collapsed ||
-                 old.userIcon !== folder.userIcon) {
-        operations.push({
-          type: 'update_folder',
-          syncId: folder.syncId,
-          oldName: old.name,
-          changes: {
-            name: folder.name,
-            collapsed: folder.collapsed,
-            userIcon: folder.userIcon,
-            workspaceName: folder.workspaceName,
-            tabUrls: folder.tabUrls,
-          },
-        });
+      } else {
+        const tabUrlsChanged = !this._arraysEqual(old.tabUrls || [], folder.tabUrls || []);
+        if (tabUrlsChanged) {
+          // Tab membership changed — remove and recreate (no API to update membership)
+          operations.push({ type: 'remove_folder', syncId: folder.syncId, folder: old });
+          operations.push({ type: 'add_folder', folder });
+        } else if (old.name !== folder.name || old.collapsed !== folder.collapsed ||
+                   old.userIcon !== folder.userIcon) {
+          operations.push({
+            type: 'update_folder',
+            syncId: folder.syncId,
+            oldName: old.name,
+            changes: {
+              name: folder.name,
+              collapsed: folder.collapsed,
+              userIcon: folder.userIcon,
+              workspaceName: folder.workspaceName,
+              tabUrls: folder.tabUrls,
+            },
+          });
+        }
       }
     }
     for (const folder of (oldState.folders || [])) {

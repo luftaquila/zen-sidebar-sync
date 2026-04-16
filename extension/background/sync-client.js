@@ -134,11 +134,12 @@ class SyncClient {
     }
   }
 
-  sendFullState(state) {
+  sendFullState(state, { replace = false } = {}) {
     if (!this.connected) return;
     this.ws.send(JSON.stringify({
       type: 'full_state',
       state,
+      replace,
       deviceId: this.deviceId,
     }));
   }

@@ -21,6 +21,77 @@ function pick(obj, keys) {
   return out;
 }
 
+// --- Logging ---
+
+function logState(label) {
+  const e = state.essentials?.length || 0;
+  const wsList = state.workspaces || [];
+  const wTabs = wsList.reduce((s, w) => s + (w.tabs?.length || 0), 0);
+  const wPinned = wsList.reduce((s, w) => s + (w.pinnedTabs?.length || 0), 0);
+  const f = (state.folders || []).length;
+  console.log(`[state] ${label} | v${state.version} | essentials:${e} workspaces:${wsList.length}(tabs:${wTabs} pinned:${wPinned}) folders:${f}`);
+  for (const ws of wsList) {
+    console.log(`  [ws] "${ws.name}" tabs:${(ws.tabs || []).length} pinned:${(ws.pinnedTabs || []).length}`);
+  }
+  for (const fld of (state.folders || [])) {
+    console.log(`  [fld] "${fld.name}" tabUrls:${(fld.tabUrls || []).length} ws:${fld.workspaceName || '(none)'}`);
+  }
+}
+
+function logPatchOps(patch) {
+  for (const op of patch.operations) {
+    switch (op.type) {
+      case 'add_essential':
+        console.log(`  [op] add_essential: ${op.tab?.url?.slice(0, 80)}`);
+        break;
+      case 'remove_essential':
+        console.log(`  [op] remove_essential: ${op.url?.slice(0, 80)}`);
+        break;
+      case 'update_essential':
+        console.log(`  [op] update_essential: ${op.oldUrl?.slice(0, 60)} → ${JSON.stringify(op.changes).slice(0, 80)}`);
+        break;
+      case 'add_tab':
+        console.log(`  [op] add_tab: ${op.tab?.url?.slice(0, 60)} → ws:"${op.workspaceName}" pinned:${op.pinned}`);
+        break;
+      case 'remove_tab':
+        console.log(`  [op] remove_tab: ${op.url?.slice(0, 60)} from ws:"${op.workspaceName}"`);
+        break;
+      case 'update_tab':
+        console.log(`  [op] update_tab: ${op.oldUrl?.slice(0, 60)} → ${JSON.stringify(op.changes).slice(0, 80)}`);
+        break;
+      case 'add_workspace':
+        console.log(`  [op] add_workspace: "${op.workspace?.name}" tabs:${op.workspace?.tabs?.length || 0} pinned:${op.workspace?.pinnedTabs?.length || 0}`);
+        break;
+      case 'remove_workspace':
+        console.log(`  [op] remove_workspace: "${op.workspace?.name}"`);
+        break;
+      case 'update_workspace':
+        console.log(`  [op] update_workspace: ${JSON.stringify(op.changes)}`);
+        break;
+      case 'add_folder':
+        console.log(`  [op] add_folder: "${op.folder?.name}" tabUrls:${(op.folder?.tabUrls || []).length} ws:"${op.folder?.workspaceName}"`);
+        break;
+      case 'remove_folder':
+        console.log(`  [op] remove_folder: "${op.folder?.name}"`);
+        break;
+      case 'update_folder':
+        console.log(`  [op] update_folder: "${op.oldName}" → ${JSON.stringify(op.changes).slice(0, 100)}`);
+        break;
+      default:
+        console.log(`  [op] ${op.type}`);
+    }
+  }
+}
+
+function logClientState(label, cs) {
+  const e = cs.essentials?.length || 0;
+  const wsList = cs.workspaces || [];
+  const wTabs = wsList.reduce((s, w) => s + (w.tabs?.length || 0), 0);
+  const wPinned = wsList.reduce((s, w) => s + (w.pinnedTabs?.length || 0), 0);
+  const f = (cs.folders || []).length;
+  console.log(`  [${label}] essentials:${e} workspaces:${wsList.length}(tabs:${wTabs} pinned:${wPinned}) folders:${f}`);
+}
+
 // --- State Management [H2] safe loading ---
 
 function loadState() {
@@ -94,10 +165,12 @@ const wss = new WebSocketServer({ port: PORT, maxPayload: 4 * 1024 * 1024 });
 const clients = new Map();
 
 console.log(`Zen Sidebar Sync server listening on ws://0.0.0.0:${PORT}`);
+logState('startup');
 
 wss.on('connection', (ws) => {
   let authenticated = false;
   let deviceId = null;
+  let deviceName = null;
 
   ws.on('message', (raw) => {
     let msg;
@@ -111,13 +184,18 @@ wss.on('connection', (ws) => {
     if (!authenticated) {
       if (msg.type === 'auth') {
         if (!authenticateToken(msg.token)) {
+          console.log(`[auth] REJECTED: ${msg.deviceName || 'unknown'}`);
           ws.send(JSON.stringify({ type: 'error', message: 'Invalid token' }));
           ws.close(4001, 'Unauthorized');
           return;
         }
         authenticated = true;
         deviceId = msg.deviceId || randomBytes(8).toString('hex');
-        clients.set(ws, { deviceId, name: msg.deviceName || 'Unknown' });
+        deviceName = msg.deviceName || 'Unknown';
+        clients.set(ws, { deviceId, name: deviceName });
+
+        console.log(`[connect] ${deviceName} (${deviceId})`);
+        logState('sent to client');
 
         ws.send(JSON.stringify({
           type: 'auth_ok',
@@ -129,10 +207,8 @@ wss.on('connection', (ws) => {
         broadcast(ws, {
           type: 'device_connected',
           deviceId,
-          deviceName: msg.deviceName || 'Unknown',
+          deviceName,
         });
-
-        console.log(`Device connected: ${msg.deviceName || deviceId}`);
         return;
       }
       ws.send(JSON.stringify({ type: 'error', message: 'Must authenticate first' }));
@@ -147,11 +223,27 @@ wss.on('connection', (ws) => {
             ws.send(JSON.stringify({ type: 'error', message: 'Invalid state structure' }));
             break;
           }
-          const merged = mergeState(state, msg.state);
-          state = merged;
+          console.log(`[${deviceName}] ← full_state (replace:${!!msg.replace})`);
+          logClientState('received', msg.state);
+
+          if (msg.replace) {
+            // Replace mode: client state becomes server state (for force_push)
+            state = {
+              essentials: msg.state.essentials || [],
+              workspaces: msg.state.workspaces || [],
+              groups: msg.state.groups || [],
+              folders: msg.state.folders || [],
+              version: state.version,
+              lastModified: Date.now(),
+            };
+          } else {
+            state = mergeState(state, msg.state);
+          }
           state.version++;
           state.lastModified = Date.now();
           scheduleSave();
+
+          logState('after full_state');
 
           ws.send(JSON.stringify({ type: 'state_accepted', version: state.version }));
           broadcast(ws, { type: 'state_update', state, sourceDevice: deviceId });
@@ -163,10 +255,15 @@ wss.on('connection', (ws) => {
             ws.send(JSON.stringify({ type: 'error', message: 'Invalid patch structure' }));
             break;
           }
+          console.log(`[${deviceName}] ← patch (${msg.patch.operations.length} ops)`);
+          logPatchOps(msg.patch);
+
           applyPatch(state, msg.patch);
           state.version++;
           state.lastModified = Date.now();
           scheduleSave();
+
+          logState('after patch');
 
           ws.send(JSON.stringify({ type: 'patch_accepted', version: state.version }));
           broadcast(ws, { type: 'patch', patch: msg.patch, version: state.version, sourceDevice: deviceId });
@@ -174,6 +271,8 @@ wss.on('connection', (ws) => {
         }
 
         case 'request_state': {
+          console.log(`[${deviceName}] ← request_state`);
+          logState('sent on request');
           ws.send(JSON.stringify({ type: 'state_update', state, sourceDevice: 'server' }));
           break;
         }
@@ -184,10 +283,11 @@ wss.on('connection', (ws) => {
         }
 
         default:
+          console.log(`[${deviceName}] ← unknown: ${msg.type}`);
           ws.send(JSON.stringify({ type: 'error', message: 'Unknown message type' }));
       }
     } catch (e) {
-      console.error('Message handling error:', e.message);
+      console.error(`[${deviceName}] message handling error:`, e.message);
       ws.send(JSON.stringify({ type: 'error', message: 'Internal error' }));
     }
   });
@@ -195,7 +295,7 @@ wss.on('connection', (ws) => {
   ws.on('close', () => {
     const client = clients.get(ws);
     if (client) {
-      console.log(`Device disconnected: ${client.name || client.deviceId}`);
+      console.log(`[disconnect] ${client.name} (${client.deviceId})`);
       broadcast(ws, { type: 'device_disconnected', deviceId: client.deviceId, deviceName: client.name });
       clients.delete(ws);
     }

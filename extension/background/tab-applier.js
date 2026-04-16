@@ -4,6 +4,8 @@
  * After every apply, recaptures tabMonitor state to prevent stale diffs.
  * Uses experiment API (chrome context) to set Zen internal tab properties
  * (zenEssential, zenWorkspace). Falls back to browser.sessions API.
+ *
+ * All apply operations are queued to prevent concurrent modifications.
  */
 
 const ALLOWED_SCHEMES = ['http:', 'https:'];
@@ -17,9 +19,29 @@ function isAllowedUrl(url) {
 class TabApplier {
   constructor(tabMonitor) {
     this.tabMonitor = tabMonitor;
+    this._queue = Promise.resolve();
   }
 
-  async applyState(remoteState, { addOnly = false } = {}) {
+  /**
+   * Queue an apply operation. Prevents concurrent applyState/applyPatch
+   * from overlapping and causing race conditions.
+   */
+  _enqueue(fn) {
+    this._queue = this._queue.then(fn).catch(err => {
+      console.error('[TabApplier] queue error:', err);
+    });
+    return this._queue;
+  }
+
+  async applyState(remoteState, opts) {
+    return this._enqueue(() => this._applyState(remoteState, opts));
+  }
+
+  async applyPatch(patch) {
+    return this._enqueue(() => this._applyPatch(patch));
+  }
+
+  async _applyState(remoteState, { addOnly = false } = {}) {
     this.tabMonitor.setApplying(true);
 
     try {
@@ -140,14 +162,15 @@ class TabApplier {
     } catch (err) {
       console.error('[TabApplier] applyState error:', err);
     } finally {
-      // Recapture to sync tabMonitor.state with actual browser state,
-      // then release the guard. This prevents stale diffs after apply.
+      // Invalidate cache so recapture gets fresh post-apply data,
+      // preventing stale diffs from echoing applied changes back.
+      this.tabMonitor.invalidateCache();
       await this.tabMonitor.captureFullState({ silent: true });
       this.tabMonitor.setApplying(false);
     }
   }
 
-  async applyPatch(patch) {
+  async _applyPatch(patch) {
     this.tabMonitor.setApplying(true);
 
     try {
@@ -175,6 +198,7 @@ class TabApplier {
     } catch (err) {
       console.error('[TabApplier] applyPatch error:', err);
     } finally {
+      this.tabMonitor.invalidateCache();
       await this.tabMonitor.captureFullState({ silent: true });
       this.tabMonitor.setApplying(false);
     }

@@ -50,10 +50,10 @@ async function init() {
 function onLocalStateChange(state, patch) {
   if (!syncEnabled || !syncClient.isConnected || !initialSyncDone) return;
 
-  if (patch.operations.length > 0 && patch.operations.length <= 10) {
+  // Always send patches — full_state merge on server is additive and
+  // doesn't propagate removals, causing stale tab resurrection.
+  if (patch.operations.length > 0) {
     syncClient.sendPatch(patch);
-  } else if (patch.operations.length > 0) {
-    syncClient.sendFullState(state);
   }
 
   lastSyncTime = Date.now();
@@ -161,7 +161,8 @@ async function handleMessage(msg, sender) {
 
     case 'force_push':
       if (syncClient.isConnected && tabMonitor.state) {
-        syncClient.sendFullState(tabMonitor.state);
+        // Replace mode: server state is completely replaced with local state
+        syncClient.sendFullState(tabMonitor.state, { replace: true });
         return { success: true };
       }
       return { success: false, error: 'Not connected' };
