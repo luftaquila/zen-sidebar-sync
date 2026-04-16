@@ -229,9 +229,11 @@ class TabApplier {
               await browser.tabs.update(existing.id, { pinned: true }).catch(() => {});
             }
             await this._organizeTab(existing.id, { essential: true });
-            // Remove from byUrl so the paired remove_tab (generated when tab
-            // moved from workspace to essentials) can't find and close it
+            // Remove from byUrl AND fullUrlToTabId so the paired remove_tab
+            // (generated when tab moved from workspace to essentials) can't
+            // find and close it via either visible or hidden workspace path
             byUrl.delete(op.tab.url);
+            fullUrlToTabId.delete(op.tab.url);
           }
           break;
         }
@@ -248,6 +250,7 @@ class TabApplier {
           }
           await this._organizeTab(existing.id, { essential: true });
           byUrl.delete(op.tab.url);
+          fullUrlToTabId.delete(op.tab.url);
         }
         break;
       }
