@@ -66,9 +66,11 @@ this.zenInternals = class extends ExtensionAPI {
             const folders = win.gBrowser.tabContainer.querySelectorAll("zen-folder");
             const result = [];
             for (const f of folders) {
+              const fname = f.label || f.name || "";
+              if (!fname) continue;
               result.push({
                 id: f.id,
-                name: f.label || "",
+                name: fname,
                 collapsed: f.collapsed || false,
                 iconURL: f.iconURL || "",
                 workspaceId: f.getAttribute("zen-workspace-id") || "",
@@ -177,6 +179,10 @@ this.zenInternals = class extends ExtensionAPI {
             let folders = [];
             const folderElements = win.gBrowser.tabContainer.querySelectorAll("zen-folder");
             for (const f of folderElements) {
+              // Skip system/placeholder folders with no name
+              const fname = f.label || f.name || "";
+              if (!fname) continue;
+
               const tabUrls = [];
               if (f.tabs) {
                 for (const tab of f.tabs) {
@@ -192,7 +198,7 @@ this.zenInternals = class extends ExtensionAPI {
               const parentFolder = f.parentElement?.closest?.("zen-folder");
               folders.push({
                 id: f.id,
-                name: f.label || "",
+                name: fname,
                 collapsed: f.collapsed || false,
                 userIcon: f.iconURL || "",
                 workspaceId: f.getAttribute("zen-workspace-id") || "",
@@ -238,7 +244,8 @@ this.zenInternals = class extends ExtensionAPI {
           try {
             const folders = win.gBrowser.tabContainer.querySelectorAll("zen-folder");
             for (const f of folders) {
-              if (f.label === options.name) {
+              const fname = f.label || f.name || "";
+              if (fname === options.name) {
                 await f.delete();
                 return { success: true };
               }
@@ -260,7 +267,8 @@ this.zenInternals = class extends ExtensionAPI {
           try {
             const folders = win.gBrowser.tabContainer.querySelectorAll("zen-folder");
             for (const f of folders) {
-              if (f.label === options.currentName) {
+              const fname = f.label || f.name || "";
+              if (fname === options.currentName) {
                 if (options.name !== undefined && options.name !== options.currentName) {
                   f.name = options.name;
                 }

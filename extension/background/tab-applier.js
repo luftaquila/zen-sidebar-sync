@@ -374,6 +374,7 @@ class TabApplier {
       // Remove local folders not in remote state (only on full sync, not addOnly)
       if (!addOnly) {
         for (const [name] of localByName) {
+          if (!name) continue; // Don't touch unnamed system folders
           if (!remoteNames.has(name)) {
             await browser.zenInternals.removeFolder({ name }).catch(() => {});
           }
