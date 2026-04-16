@@ -287,9 +287,10 @@ class TabMonitor {
     }
 
     for (const f of (nativeData.folders || [])) {
+      if (!f.name) continue; // Skip unnamed system/placeholder folders
       const wsName = wsUuidToName.get(f.workspaceId) || '';
       // Name-based syncId for cross-device consistency (not device-local DOM id)
-      const syncId = this._makeSyncId('fld', `${f.name || ''}:${wsName}`);
+      const syncId = this._makeSyncId('fld', `${f.name}:${wsName}`);
       let parentSyncId = null;
       if (f.parentId) {
         const parent = folderIdToKey.get(f.parentId);
