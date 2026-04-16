@@ -30,6 +30,10 @@ class TabMonitor {
     this._experimentData = null;
     this._experimentLastFetch = 0;
     this._experimentAvailable = null;
+
+    // Tab ID → info map for event-driven removal operations.
+    // Populated from browser.tabs.query() after each state capture.
+    this._tabIdToInfo = new Map();
   }
 
   async init() {
@@ -55,6 +59,34 @@ class TabMonitor {
 
   _onTabEvent(event, tab) {
     if (this._applyingCount > 0) return;
+
+    // Tab removals: generate removal op immediately from cached tab info.
+    // This is the ONLY source of remove_tab/remove_essential ops — the diff
+    // engine does NOT generate them, preventing incomplete captures from
+    // creating false mass-removal patches.
+    if (event === 'removed' && tab.id != null) {
+      const info = this._tabIdToInfo.get(tab.id);
+      if (info) {
+        this._tabIdToInfo.delete(tab.id);
+        // Update internal state
+        if (info.isEssential) {
+          this.state.essentials = this.state.essentials.filter(t => t.syncId !== info.syncId);
+        } else if (info.workspaceSyncId) {
+          const ws = this.state.workspaces.find(w => w.syncId === info.workspaceSyncId);
+          if (ws) {
+            ws.tabs = (ws.tabs || []).filter(t => t.syncId !== info.syncId);
+            ws.pinnedTabs = (ws.pinnedTabs || []).filter(t => t.syncId !== info.syncId);
+          }
+        }
+        const op = info.isEssential
+          ? { type: 'remove_essential', syncId: info.syncId, url: info.url }
+          : { type: 'remove_tab', workspaceSyncId: info.workspaceSyncId,
+              workspaceName: info.workspaceName, syncId: info.syncId, url: info.url };
+        this.onStateChange(this.state, { operations: [op], timestamp: Date.now() });
+      }
+      return; // Removal handled — no debounced capture needed
+    }
+
     clearTimeout(this.debounceTimer);
     this.debounceTimer = setTimeout(() => this.captureFullState(), this.DEBOUNCE_MS);
   }
@@ -150,7 +182,7 @@ class TabMonitor {
    * @param {Object} opts
    * @param {boolean} opts.silent - If true, update state without firing onStateChange
    */
-  async captureFullState({ silent = false } = {}) {
+  async captureFullState({ silent = false, skipGuard = false } = {}) {
     try {
       // Priority: experiment API > native host > browser.tabs fallback
       let newState;
@@ -166,8 +198,24 @@ class TabMonitor {
         }
       }
 
+      // Data source returned unreliable data (e.g. many unresolved workspace UUIDs)
+      if (!newState) return;
+
+      // Reject captures where tab count drops dramatically — indicates incomplete
+      // data from experiment API or native host. skipGuard is true for post-apply
+      // recaptures where the drop is intentional (remote state had fewer tabs).
+      if (!skipGuard) {
+        const oldCount = this._countTabs(this.state);
+        const newCount = this._countTabs(newState);
+        if (oldCount > 5 && newCount < oldCount * 0.3) {
+          console.warn(`[TabMonitor] Capture rejected: tab count dropped ${oldCount} → ${newCount} (>70% loss)`);
+          return;
+        }
+      }
+
       const patch = this._computePatch(this.state, newState);
       this.state = newState;
+      this._updateTabIdMap();
 
       if (!silent && patch.operations.length > 0) {
         this.onStateChange(newState, patch);
@@ -206,6 +254,14 @@ class TabMonitor {
       });
     }
 
+    // Reverse map: UUID → workspace name from previous captures.
+    // Used to resolve workspace names when the workspace list is temporarily incomplete.
+    const reverseWsMap = new Map();
+    for (const [name, uuid] of this.workspaceUuidMap) {
+      reverseWsMap.set(uuid, name);
+    }
+
+    let skippedTabs = 0;
     for (const tab of nativeData.tabs) {
       const favicon = faviconByUrl.get(tab.url) || '';
 
@@ -222,16 +278,38 @@ class TabMonitor {
       } else {
         const zenUuid = tab.zenWorkspace || '__default__';
         if (!workspaceMap.has(zenUuid)) {
-          workspaceMap.set(zenUuid, {
-            _zenUuid: zenUuid,
-            syncId: zenUuid,
-            name: zenUuid === '__default__' ? 'Default' : zenUuid,
-            icon: '',
-            tabs: [],
-            pinnedTabs: [],
-            position: workspaceMap.size,
-            lastModified: Date.now(),
-          });
+          if (zenUuid === '__default__') {
+            workspaceMap.set(zenUuid, {
+              _zenUuid: zenUuid,
+              syncId: zenUuid,
+              name: 'Default',
+              icon: '',
+              tabs: [],
+              pinnedTabs: [],
+              position: workspaceMap.size,
+              lastModified: Date.now(),
+            });
+          } else {
+            // Try to resolve from previously known workspace names
+            const knownName = reverseWsMap.get(zenUuid);
+            if (knownName) {
+              workspaceMap.set(zenUuid, {
+                _zenUuid: zenUuid,
+                syncId: zenUuid,
+                name: knownName,
+                icon: '',
+                tabs: [],
+                pinnedTabs: [],
+                position: workspaceMap.size,
+                lastModified: Date.now(),
+              });
+            } else {
+              // Truly unknown workspace UUID — skip this tab rather than
+              // creating a phantom UUID-named workspace.
+              skippedTabs++;
+              continue;
+            }
+          }
         }
 
         const ws = workspaceMap.get(zenUuid);
@@ -249,6 +327,16 @@ class TabMonitor {
         if (tab.pinned) ws.pinnedTabs.push(tabData);
         else ws.tabs.push(tabData);
       }
+    }
+
+    // Too many tabs referencing unknown workspace UUIDs = unreliable data source
+    const totalTabs = nativeData.tabs.length;
+    if (totalTabs > 5 && skippedTabs > totalTabs * 0.2) {
+      console.warn(`[TabMonitor] Capture rejected: ${skippedTabs}/${totalTabs} tabs reference unknown workspaces`);
+      return null;
+    }
+    if (skippedTabs > 0) {
+      console.warn(`[TabMonitor] Skipped ${skippedTabs} tabs with unresolvable workspace UUIDs`);
     }
 
     newState.workspaces = Array.from(workspaceMap.values());
@@ -455,10 +543,65 @@ class TabMonitor {
     return sa.every((v, i) => v === sb[i]);
   }
 
+  _countTabs(state) {
+    if (!state) return 0;
+    let count = (state.essentials || []).length;
+    for (const ws of (state.workspaces || [])) {
+      count += (ws.tabs || []).length + (ws.pinnedTabs || []).length;
+    }
+    return count;
+  }
+
+  /**
+   * Rebuild the tabId → info map from browser.tabs.query results.
+   * This map is used by _onTabEvent('removed') to generate removal ops
+   * directly from the event, bypassing the diff engine entirely.
+   */
+  async _updateTabIdMap() {
+    try {
+      const browserTabs = await browser.tabs.query({});
+      this._tabIdToInfo.clear();
+      for (const bt of browserTabs) {
+        if (!bt.url || (!bt.url.startsWith('http:') && !bt.url.startsWith('https:'))) continue;
+
+        const essSyncId = this._makeSyncId('ess', bt.url);
+        if (this.state.essentials.some(e => e.syncId === essSyncId)) {
+          this._tabIdToInfo.set(bt.id, {
+            url: bt.url, syncId: essSyncId, isEssential: true,
+            workspaceSyncId: null, workspaceName: null,
+          });
+          continue;
+        }
+
+        const tabSyncId = this._makeSyncId('tab', bt.url);
+        for (const ws of this.state.workspaces) {
+          const allWsTabs = [...(ws.tabs || []), ...(ws.pinnedTabs || [])];
+          if (allWsTabs.some(t => t.syncId === tabSyncId)) {
+            this._tabIdToInfo.set(bt.id, {
+              url: bt.url, syncId: tabSyncId, isEssential: false,
+              workspaceSyncId: ws.syncId, workspaceName: ws.name,
+            });
+            break;
+          }
+        }
+      }
+    } catch (e) {
+      console.warn('[TabMonitor] _updateTabIdMap error:', e.message);
+    }
+  }
+
   // --- Diff Engine ---
+  //
+  // Tab/essential REMOVALS are NOT generated by diffs. They come exclusively
+  // from tabs.onRemoved browser events (see _onTabEvent). This prevents
+  // incomplete data captures from generating false mass-removal patches.
+  //
+  // Exception: "moves" (e.g. essential→workspace) emit a removal paired with
+  // an addition for the same URL, detected via addedUrls set below.
 
   _computePatch(oldState, newState) {
     const operations = [];
+    const pendingRemovals = []; // Collected but not yet emitted
 
     // Diff essentials
     const oldEssMap = new Map(oldState.essentials.map(t => [t.syncId, t]));
@@ -479,7 +622,7 @@ class TabMonitor {
     }
     for (const tab of oldState.essentials) {
       if (!newEssIds.has(tab.syncId)) {
-        operations.push({ type: 'remove_essential', syncId: tab.syncId, url: tab.url });
+        pendingRemovals.push({ type: 'remove_essential', syncId: tab.syncId, url: tab.url });
       }
     }
 
@@ -499,17 +642,37 @@ class TabMonitor {
             changes: { name: ws.name, icon: ws.icon },
           });
         }
-        this._diffTabList(oldWs.tabs || [], ws.tabs || [], ws.syncId, ws.name, false, operations);
-        this._diffTabList(oldWs.pinnedTabs || [], ws.pinnedTabs || [], ws.syncId, ws.name, true, operations);
+        this._diffTabList(oldWs.tabs || [], ws.tabs || [], ws.syncId, ws.name, false, operations, pendingRemovals);
+        this._diffTabList(oldWs.pinnedTabs || [], ws.pinnedTabs || [], ws.syncId, ws.name, true, operations, pendingRemovals);
       }
     }
+    // Workspace removals always from diff (small list, reliable)
     for (const ws of oldState.workspaces) {
       if (!newWsIds.has(ws.syncId)) {
         operations.push({ type: 'remove_workspace', syncId: ws.syncId, workspace: ws });
       }
     }
 
-    // Diff folders
+    // Move detection: only emit tab/essential removals if the same URL was
+    // re-added elsewhere. True tab closes come from tabs.onRemoved events.
+    const addedUrls = new Set();
+    for (const op of operations) {
+      if ((op.type === 'add_essential' || op.type === 'add_tab') && op.tab?.url) {
+        addedUrls.add(op.tab.url);
+      }
+      if (op.type === 'add_workspace' && op.workspace) {
+        for (const t of [...(op.workspace.tabs || []), ...(op.workspace.pinnedTabs || [])]) {
+          if (t.url) addedUrls.add(t.url);
+        }
+      }
+    }
+    for (const removal of pendingRemovals) {
+      if (addedUrls.has(removal.url)) {
+        operations.push(removal);
+      }
+    }
+
+    // Diff folders (folder list is small and reliable — diff-driven is safe)
     const oldFldMap = new Map((oldState.folders || []).map(f => [f.syncId, f]));
     const newFldIds = new Set((newState.folders || []).map(f => f.syncId));
 
@@ -520,7 +683,6 @@ class TabMonitor {
       } else {
         const tabUrlsChanged = !this._arraysEqual(old.tabUrls || [], folder.tabUrls || []);
         if (tabUrlsChanged) {
-          // Tab membership changed — remove and recreate (no API to update membership)
           operations.push({ type: 'remove_folder', syncId: folder.syncId, folder: old });
           operations.push({ type: 'add_folder', folder });
         } else if (old.name !== folder.name || old.collapsed !== folder.collapsed ||
@@ -549,7 +711,7 @@ class TabMonitor {
     return { operations, timestamp: Date.now() };
   }
 
-  _diffTabList(oldTabs, newTabs, workspaceSyncId, workspaceName, pinned, operations) {
+  _diffTabList(oldTabs, newTabs, workspaceSyncId, workspaceName, pinned, operations, pendingRemovals) {
     const oldMap = new Map(oldTabs.map(t => [t.syncId, t]));
     const newIds = new Set(newTabs.map(t => t.syncId));
 
@@ -568,9 +730,11 @@ class TabMonitor {
         });
       }
     }
+    // Tab removals go to pendingRemovals for move detection, NOT operations.
+    // Actual closes come from tabs.onRemoved events.
     for (const tab of oldTabs) {
       if (!newIds.has(tab.syncId)) {
-        operations.push({ type: 'remove_tab', workspaceSyncId, workspaceName, syncId: tab.syncId, url: tab.url });
+        pendingRemovals.push({ type: 'remove_tab', workspaceSyncId, workspaceName, syncId: tab.syncId, url: tab.url });
       }
     }
   }

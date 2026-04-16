@@ -165,7 +165,7 @@ class TabApplier {
       // Invalidate cache so recapture gets fresh post-apply data,
       // preventing stale diffs from echoing applied changes back.
       this.tabMonitor.invalidateCache();
-      await this.tabMonitor.captureFullState({ silent: true });
+      await this.tabMonitor.captureFullState({ silent: true, skipGuard: true });
       this.tabMonitor.setApplying(false);
     }
   }
@@ -199,7 +199,7 @@ class TabApplier {
       console.error('[TabApplier] applyPatch error:', err);
     } finally {
       this.tabMonitor.invalidateCache();
-      await this.tabMonitor.captureFullState({ silent: true });
+      await this.tabMonitor.captureFullState({ silent: true, skipGuard: true });
       this.tabMonitor.setApplying(false);
     }
   }

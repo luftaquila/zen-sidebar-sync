@@ -33,6 +33,10 @@ Zen Browser sidebar sync extension + WebSocket sync server. Syncs essentials, wo
 
 - Initial connect merges additively (never closes local tabs on first sync).
 - After initial sync, all changes propagate bidirectionally including tab closes.
+- **Event-driven tab removals**: `remove_tab`/`remove_essential` ops are generated ONLY from `tabs.onRemoved` browser events (via `_tabIdToInfo` map), never from state diffs. The diff engine (`_computePatch`) collects potential tab removals as "pending" and only emits them if the same URL was re-added elsewhere (= move, e.g. essential↔workspace). This eliminates mass-deletion bugs caused by incomplete data captures returning fewer tabs.
+- **Server-side mass removal guard**: server rejects any patch where removal ops exceed 50% of current state items. Defense-in-depth against corrupted capture data.
+- **Workspace UUID filter**: tabs referencing workspace UUIDs not in the workspace list are skipped (not assigned to phantom UUID-named workspaces). A reverse map from previous captures resolves transiently missing workspaces. If >20% of tabs reference unknown workspaces, the entire capture is rejected.
+- **Tab count safety guard**: `captureFullState` rejects captures where tab count drops >70% from previous state (unless `skipGuard: true` for post-apply recaptures).
 - Empty remote state triggers addOnly mode to prevent accidental mass tab deletion.
 - **Tab state data source priority**: (1) Experiment API `getTabData` — reads all tab DOM attributes (`zen-essential`, `zen-workspace-id`) and workspaces directly from chrome context via `gBrowser.tabs`. (2) Native messaging host — reads `recovery.jsonlz4` and `zen-sessions.jsonlz4` session store files. (3) `browser.tabs.query` + `browser.sessions` fallback — limited to active workspace only.
 - `browser.tabs.query({})` in Zen 1.8b+ only returns active workspace tabs — hidden workspace tabs are invisible to WebExtension API. Experiment API and native host both see all workspaces.

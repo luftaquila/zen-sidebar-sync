@@ -255,6 +255,17 @@ wss.on('connection', (ws) => {
             ws.send(JSON.stringify({ type: 'error', message: 'Invalid patch structure' }));
             break;
           }
+
+          // Safety: reject patches that would mass-remove items (corrupted capture)
+          const removals = countPatchRemovals(msg.patch, state);
+          const currentItems = countStateItems(state);
+          if (currentItems > 5 && removals > currentItems * 0.5) {
+            console.warn(`[${deviceName}] REJECTED patch: ${removals} removals = ${Math.round(removals/currentItems*100)}% of ${currentItems} items`);
+            logPatchOps(msg.patch);
+            ws.send(JSON.stringify({ type: 'error', message: 'Patch rejected: too many removals' }));
+            break;
+          }
+
           console.log(`[${deviceName}] ← patch (${msg.patch.operations.length} ops)`);
           logPatchOps(msg.patch);
 
@@ -430,6 +441,38 @@ function mergeWorkspaces(serverWs, clientWs) {
 
   return Array.from(byName.values())
     .sort((a, b) => (a.position ?? 0) - (b.position ?? 0));
+}
+
+// --- Patch Safety ---
+
+function countPatchRemovals(patch, st) {
+  let removals = 0;
+  for (const op of patch.operations) {
+    switch (op.type) {
+      case 'remove_essential':
+      case 'remove_tab':
+      case 'remove_folder':
+        removals++;
+        break;
+      case 'remove_workspace': {
+        const ws = st.workspaces.find(w => w.syncId === op.syncId);
+        if (ws) removals += (ws.tabs || []).length + (ws.pinnedTabs || []).length;
+        removals++;
+        break;
+      }
+    }
+  }
+  return removals;
+}
+
+function countStateItems(st) {
+  let count = (st.essentials || []).length;
+  for (const ws of (st.workspaces || [])) {
+    count++;
+    count += (ws.tabs || []).length + (ws.pinnedTabs || []).length;
+  }
+  count += (st.folders || []).length;
+  return count;
 }
 
 // --- Patch Application [C1][P4] sanitized + map-based ---
