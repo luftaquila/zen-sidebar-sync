@@ -223,17 +223,24 @@ class TabApplier {
       case 'add_essential': {
         if (!isAllowedUrl(op.tab?.url)) break;
         if (allLocalUrls.has(op.tab.url)) {
+          // Tab exists locally — promote to essential (move from workspace)
+          // Clean maps so paired remove_tab can't close the moved tab
           const existing = byUrl.get(op.tab.url);
           if (existing) {
             if (!existing.pinned) {
               await browser.tabs.update(existing.id, { pinned: true }).catch(() => {});
             }
             await this._organizeTab(existing.id, { essential: true });
-            // Remove from byUrl AND fullUrlToTabId so the paired remove_tab
-            // (generated when tab moved from workspace to essentials) can't
-            // find and close it via either visible or hidden workspace path
             byUrl.delete(op.tab.url);
             fullUrlToTabId.delete(op.tab.url);
+          } else {
+            // Hidden workspace tab — promote via experiment API tab ID
+            const hiddenTabId = fullUrlToTabId.get(op.tab.url);
+            if (hiddenTabId != null) {
+              await browser.tabs.update(hiddenTabId, { pinned: true }).catch(() => {});
+              await this._organizeTab(hiddenTabId, { essential: true });
+              fullUrlToTabId.delete(op.tab.url);
+            }
           }
           break;
         }
@@ -292,7 +299,33 @@ class TabApplier {
 
       case 'add_tab': {
         if (!isAllowedUrl(op.tab?.url)) break;
-        if (allLocalUrls.has(op.tab.url)) break;
+        if (allLocalUrls.has(op.tab.url)) {
+          // Tab exists locally — reorganize for move operations
+          // (essential→workspace, workspace A→B). removeEssential clears
+          // zen-essential attribute if the tab was previously an essential.
+          // Clean maps so paired remove_essential/remove_tab can't close it.
+          const existing = byUrl.get(op.tab.url);
+          const wsUuid = await this._ensureWorkspace(op.workspaceName);
+          if (existing) {
+            if (op.pinned && !existing.pinned) {
+              await browser.tabs.update(existing.id, { pinned: true }).catch(() => {});
+            } else if (!op.pinned && existing.pinned) {
+              await browser.tabs.update(existing.id, { pinned: false }).catch(() => {});
+            }
+            await this._organizeTab(existing.id, { removeEssential: true, workspaceId: wsUuid });
+            byUrl.delete(op.tab.url);
+            fullUrlToTabId.delete(op.tab.url);
+          } else {
+            // Hidden workspace tab — reorganize via experiment API tab ID
+            const hiddenTabId = fullUrlToTabId.get(op.tab.url);
+            if (hiddenTabId != null) {
+              await browser.tabs.update(hiddenTabId, { pinned: !!op.pinned }).catch(() => {});
+              await this._organizeTab(hiddenTabId, { removeEssential: true, workspaceId: wsUuid });
+              fullUrlToTabId.delete(op.tab.url);
+            }
+          }
+          break;
+        }
         const wsUuid = await this._ensureWorkspace(op.workspaceName);
         const tab = await this._createTab(op.tab.url, {
           pinned: op.pinned || false,
@@ -309,20 +342,53 @@ class TabApplier {
         if (!op.workspace) break;
         const wsUuid2 = await this._ensureWorkspace(op.workspace.name, op.workspace.icon);
         for (const tab of (op.workspace.pinnedTabs || [])) {
-          if (isAllowedUrl(tab.url) && !allLocalUrls.has(tab.url)) {
+          if (!isAllowedUrl(tab.url)) continue;
+          if (!allLocalUrls.has(tab.url)) {
             const created = await this._createTab(tab.url, { pinned: true, workspaceId: wsUuid2 });
             if (created) {
               byUrl.set(tab.url, created);
               allLocalUrls.add(tab.url);
             }
+          } else {
+            // Tab exists — reorganize for move (clean maps for paired removal)
+            const existing = byUrl.get(tab.url);
+            if (existing) {
+              if (!existing.pinned) await browser.tabs.update(existing.id, { pinned: true }).catch(() => {});
+              await this._organizeTab(existing.id, { removeEssential: true, workspaceId: wsUuid2 });
+              byUrl.delete(tab.url);
+              fullUrlToTabId.delete(tab.url);
+            } else {
+              const hiddenTabId = fullUrlToTabId.get(tab.url);
+              if (hiddenTabId != null) {
+                await browser.tabs.update(hiddenTabId, { pinned: true }).catch(() => {});
+                await this._organizeTab(hiddenTabId, { removeEssential: true, workspaceId: wsUuid2 });
+                fullUrlToTabId.delete(tab.url);
+              }
+            }
           }
         }
         for (const tab of (op.workspace.tabs || [])) {
-          if (isAllowedUrl(tab.url) && !allLocalUrls.has(tab.url)) {
+          if (!isAllowedUrl(tab.url)) continue;
+          if (!allLocalUrls.has(tab.url)) {
             const created = await this._createTab(tab.url, { pinned: false, workspaceId: wsUuid2 });
             if (created) {
               byUrl.set(tab.url, created);
               allLocalUrls.add(tab.url);
+            }
+          } else {
+            const existing = byUrl.get(tab.url);
+            if (existing) {
+              if (existing.pinned) await browser.tabs.update(existing.id, { pinned: false }).catch(() => {});
+              await this._organizeTab(existing.id, { removeEssential: true, workspaceId: wsUuid2 });
+              byUrl.delete(tab.url);
+              fullUrlToTabId.delete(tab.url);
+            } else {
+              const hiddenTabId = fullUrlToTabId.get(tab.url);
+              if (hiddenTabId != null) {
+                await browser.tabs.update(hiddenTabId, { pinned: false }).catch(() => {});
+                await this._organizeTab(hiddenTabId, { removeEssential: true, workspaceId: wsUuid2 });
+                fullUrlToTabId.delete(tab.url);
+              }
             }
           }
         }
@@ -337,8 +403,15 @@ class TabApplier {
             if (local) {
               await browser.tabs.remove(local.id).catch(() => {});
               byUrl.delete(tab.url);
-              allLocalUrls.delete(tab.url);
+            } else {
+              // Hidden workspace tab — remove via experiment API tab ID
+              const hiddenTabId = fullUrlToTabId.get(tab.url);
+              if (hiddenTabId != null) {
+                await browser.tabs.remove(hiddenTabId).catch(() => {});
+                fullUrlToTabId.delete(tab.url);
+              }
             }
+            allLocalUrls.delete(tab.url);
           }
         }
         break;
@@ -493,9 +566,10 @@ class TabApplier {
 
   // --- Tab organization ---
 
-  async _organizeTab(tabId, { essential = false, workspaceId = null } = {}) {
+  async _organizeTab(tabId, { essential = false, removeEssential = false, workspaceId = null } = {}) {
     const opts = {};
     if (essential) opts.essential = true;
+    if (removeEssential) opts.removeEssential = true;
     if (workspaceId && workspaceId !== '__default__') opts.workspaceUuid = workspaceId;
     if (Object.keys(opts).length === 0) return;
 
@@ -505,6 +579,9 @@ class TabApplier {
       // Fallback: session API (stores in extData, may not be read by Zen)
       if (essential) {
         await browser.sessions.setTabValue(tabId, 'zen-essential', true).catch(() => {});
+      }
+      if (removeEssential) {
+        await browser.sessions.removeTabValue(tabId, 'zen-essential').catch(() => {});
       }
       if (opts.workspaceUuid) {
         await browser.sessions.setTabValue(tabId, 'zen-workspace-id', opts.workspaceUuid).catch(() => {});

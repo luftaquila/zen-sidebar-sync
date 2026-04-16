@@ -53,6 +53,7 @@
             "type": "object",
             "properties": {
               "essential": { "type": "boolean", "optional": true },
+              "removeEssential": { "type": "boolean", "optional": true },
               "workspaceUuid": { "type": "string", "optional": true }
             }
           }

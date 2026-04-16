@@ -130,6 +130,10 @@ this.zenInternals = class extends ExtensionAPI {
               }
             }
 
+            if (options.removeEssential) {
+              tab.removeAttribute("zen-essential");
+            }
+
             // Ref: zen-browser/desktop src/zen/spaces/ZenSpaceManager.mjs moveTabToWorkspace()
             if (options.workspaceUuid) {
               if (win.gZenWorkspaces) {
