@@ -17,7 +17,8 @@
               "collapsed": { "type": "boolean", "optional": true },
               "userIcon": { "type": "string", "optional": true },
               "workspaceName": { "type": "string", "optional": true, "description": "Target workspace name" },
-              "tabUrls": { "type": "array", "optional": true, "items": { "type": "string" }, "description": "URLs of tabs to include in the folder" }
+              "tabIds": { "type": "array", "optional": true, "items": { "type": "integer" }, "description": "WebExtension tab IDs to include in the folder (preferred over tabUrls)" },
+              "tabUrls": { "type": "array", "optional": true, "items": { "type": "string" }, "description": "URLs of tabs to include in the folder (fallback when tabIds unavailable)" }
             }
           }
         ]

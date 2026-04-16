@@ -22,9 +22,21 @@ this.zenInternals = class extends ExtensionAPI {
               if (ws) workspaceId = ws.uuid;
             }
 
-            // Find tab elements by URL (gBrowser.tabs has ALL workspace tabs)
+            // Resolve tab elements — prefer tabIds (WebExtension IDs, reliable)
+            // over tabUrls (currentURI race condition with newly created tabs)
             let tabElements = [];
-            if (options.tabUrls && options.tabUrls.length > 0) {
+            if (options.tabIds && options.tabIds.length > 0) {
+              const { ExtensionParent } = ChromeUtils.importESModule(
+                "resource://gre/modules/ExtensionParent.sys.mjs"
+              );
+              for (const tabId of options.tabIds) {
+                try {
+                  const tab = ExtensionParent.apiManager.global.tabTracker.getTab(tabId);
+                  if (tab) tabElements.push(tab);
+                } catch (e) {}
+              }
+            } else if (options.tabUrls && options.tabUrls.length > 0) {
+              // Fallback: URL matching (used when tab IDs aren't available)
               const urlSet = new Set(options.tabUrls);
               for (const tab of win.gBrowser.tabs) {
                 try {
@@ -33,9 +45,7 @@ this.zenInternals = class extends ExtensionAPI {
                     tabElements.push(tab);
                     urlSet.delete(url);
                   }
-                } catch (e) {
-                  // Skip tabs that can't be inspected
-                }
+                } catch (e) {}
               }
             }
 
