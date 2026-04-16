@@ -214,8 +214,21 @@ class TabMonitor {
       }
 
       const patch = this._computePatch(this.state, newState);
+
+      // Extract experiment tab IDs before storing state
+      const tabIdToUrl = newState._tabIdToUrl;
+      delete newState._tabIdToUrl;
+
       this.state = newState;
-      this._updateTabIdMap();
+
+      // Build _tabIdToInfo for event-driven removals.
+      // Experiment API tab IDs cover ALL workspaces (including hidden ones).
+      // browser.tabs.query fallback only covers active workspace.
+      if (tabIdToUrl && tabIdToUrl.size > 0) {
+        this._buildTabIdInfoFromExperiment(tabIdToUrl);
+      } else {
+        await this._updateTabIdMap();
+      }
 
       if (!silent && patch.operations.length > 0) {
         this.onStateChange(newState, patch);
@@ -261,9 +274,15 @@ class TabMonitor {
       reverseWsMap.set(uuid, name);
     }
 
+    // Collect WebExtension tab IDs from experiment API (covers all workspaces).
+    // Native host data doesn't have tab IDs, so this map is only populated
+    // when the experiment API provided the data.
+    const tabIdToUrl = new Map();
+
     let skippedTabs = 0;
     for (const tab of nativeData.tabs) {
       const favicon = faviconByUrl.get(tab.url) || '';
+      if (tab.tabId != null) tabIdToUrl.set(tab.tabId, tab.url);
 
       if (tab.zenEssential) {
         newState.essentials.push({
@@ -403,6 +422,11 @@ class TabMonitor {
       this.workspaceUuidMap.set(ws.name, ws._zenUuid);
       ws.syncId = this._makeSyncId('ws', ws.name);
       delete ws._zenUuid;
+    }
+
+    // Pass experiment tab IDs through for full-workspace _tabIdToInfo map
+    if (tabIdToUrl.size > 0) {
+      newState._tabIdToUrl = tabIdToUrl;
     }
 
     return newState;
@@ -553,9 +577,38 @@ class TabMonitor {
   }
 
   /**
-   * Rebuild the tabId → info map from browser.tabs.query results.
-   * This map is used by _onTabEvent('removed') to generate removal ops
-   * directly from the event, bypassing the diff engine entirely.
+   * Build _tabIdToInfo from experiment API tab IDs (covers ALL workspaces).
+   * Used when getTabData provides tabId fields.
+   */
+  _buildTabIdInfoFromExperiment(tabIdToUrl) {
+    this._tabIdToInfo.clear();
+    for (const [tabId, url] of tabIdToUrl) {
+      const essSyncId = this._makeSyncId('ess', url);
+      if (this.state.essentials.some(e => e.syncId === essSyncId)) {
+        this._tabIdToInfo.set(tabId, {
+          url, syncId: essSyncId, isEssential: true,
+          workspaceSyncId: null, workspaceName: null,
+        });
+        continue;
+      }
+
+      const tabSyncId = this._makeSyncId('tab', url);
+      for (const ws of this.state.workspaces) {
+        const allWsTabs = [...(ws.tabs || []), ...(ws.pinnedTabs || [])];
+        if (allWsTabs.some(t => t.syncId === tabSyncId)) {
+          this._tabIdToInfo.set(tabId, {
+            url, syncId: tabSyncId, isEssential: false,
+            workspaceSyncId: ws.syncId, workspaceName: ws.name,
+          });
+          break;
+        }
+      }
+    }
+  }
+
+  /**
+   * Fallback: rebuild _tabIdToInfo from browser.tabs.query results.
+   * Only covers active workspace tabs (hidden workspace tabs invisible).
    */
   async _updateTabIdMap() {
     try {

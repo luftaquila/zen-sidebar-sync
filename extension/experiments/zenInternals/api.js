@@ -154,12 +154,18 @@ this.zenInternals = class extends ExtensionAPI {
           }
 
           try {
+            const { ExtensionParent } = ChromeUtils.importESModule(
+              "resource://gre/modules/ExtensionParent.sys.mjs"
+            );
+            const tabTracker = ExtensionParent.apiManager.global.tabTracker;
+
             const tabs = [];
             // gBrowser.tabs returns ALL tabs across all workspaces
             for (const tab of win.gBrowser.tabs) {
               try {
                 const url = tab.linkedBrowser?.currentURI?.spec;
                 if (!url || (!url.startsWith("http://") && !url.startsWith("https://"))) continue;
+                const webExtId = tabTracker.getId(tab);
                 tabs.push({
                   url,
                   title: tab.label || "",
@@ -169,6 +175,7 @@ this.zenInternals = class extends ExtensionAPI {
                   zenWorkspace: tab.getAttribute("zen-workspace-id") || null,
                   pinned: tab.pinned || false,
                   groupId: tab.group?.id || null,
+                  tabId: webExtId >= 0 ? webExtId : null,
                 });
               } catch (e) {
                 // Skip tabs that can't be inspected

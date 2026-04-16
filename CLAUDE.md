@@ -33,7 +33,7 @@ Zen Browser sidebar sync extension + WebSocket sync server. Syncs essentials, wo
 
 - Initial connect merges additively (never closes local tabs on first sync).
 - After initial sync, all changes propagate bidirectionally including tab closes.
-- **Event-driven tab removals**: `remove_tab`/`remove_essential` ops are generated ONLY from `tabs.onRemoved` browser events (via `_tabIdToInfo` map), never from state diffs. The diff engine (`_computePatch`) collects potential tab removals as "pending" and only emits them if the same URL was re-added elsewhere (= move, e.g. essential↔workspace). This eliminates mass-deletion bugs caused by incomplete data captures returning fewer tabs.
+- **Event-driven tab removals**: `remove_tab`/`remove_essential` ops are generated ONLY from `tabs.onRemoved` browser events (via `_tabIdToInfo` map), never from state diffs. The diff engine (`_computePatch`) collects potential tab removals as "pending" and only emits them if the same URL was re-added elsewhere (= move, e.g. essential↔workspace). This eliminates mass-deletion bugs caused by incomplete data captures returning fewer tabs. The `_tabIdToInfo` map is built from experiment API `getTabData` (which includes `tabId` via `tabTracker.getId()` for ALL workspaces) when available, falling back to `browser.tabs.query` (active workspace only).
 - **Server-side mass removal guard**: server rejects any patch where removal ops exceed 50% of current state items. Defense-in-depth against corrupted capture data.
 - **Workspace UUID filter**: tabs referencing workspace UUIDs not in the workspace list are skipped (not assigned to phantom UUID-named workspaces). A reverse map from previous captures resolves transiently missing workspaces. If >20% of tabs reference unknown workspaces, the entire capture is rejected.
 - **Tab count safety guard**: `captureFullState` rejects captures where tab count drops >70% from previous state (unless `skipGuard: true` for post-apply recaptures).
@@ -67,8 +67,7 @@ Zen Browser sidebar sync extension + WebSocket sync server. Syncs essentials, wo
 
 ## Known limitations
 
-- **Hidden workspace tab removal**: `applyState` step 4 (remove tabs not in remote state) only removes active workspace tabs because `browser.tabs.query` doesn't return hidden ones. Tabs removed from remote state in hidden workspaces become zombies until that workspace is activated.
-- **Fallback mode limitations**: Without experiment API or native messaging host, only active workspace tabs are visible. Workspace/folder creation and organization require experiment API — fallback mode can only sync tabs.
+- **Fallback mode limitations**: Without experiment API or native messaging host, only active workspace tabs are visible. Workspace/folder creation and organization require experiment API — fallback mode can only sync tabs. Hidden workspace tab removal requires experiment API tab IDs; in fallback mode, hidden workspace tabs removed remotely persist until the workspace is activated.
 - **Folder rename is remove+add**: Folder syncIds are name-based, so renaming a folder produces a remove_folder + add_folder pair. Tabs are ungrouped by `folder.delete()` then regrouped by `createFolder` via URL matching.
 - **Folder content change is remove+add**: Adding/removing a tab from a folder emits remove_folder + add_folder. Causes brief visual flicker. No Zen API to update folder membership in place.
 - **Pin toggle recreates tab**: Toggling pin state moves a tab between `ws.tabs` and `ws.pinnedTabs`, generating `remove_tab` + `add_tab`. The tab is destroyed and recreated, losing in-page state (scroll position, form data).

@@ -145,12 +145,19 @@ class TabApplier {
       // 3. Folder sync (add, update, remove) — pass tab ID map for reliable assignment
       await this._applyFolders(remoteState.folders || [], { addOnly, urlToTabId });
 
-      // 4. Remove tabs not in remote state
+      // 4. Remove tabs not in remote state (including hidden workspace tabs)
       if (!addOnly) {
         for (const local of localTabs) {
           if (!local.url || local.url.startsWith('about:') || local.url.startsWith('moz-extension:')) continue;
           if (!remoteUrls.has(local.url)) {
             await browser.tabs.remove(local.id).catch(() => {});
+          }
+        }
+
+        // Also remove hidden workspace tabs using experiment API tab IDs
+        for (const [tabId, info] of this.tabMonitor._tabIdToInfo) {
+          if (!remoteUrls.has(info.url)) {
+            await browser.tabs.remove(tabId).catch(() => {});
           }
         }
 
@@ -192,8 +199,15 @@ class TabApplier {
         if (t.url) byUrl.set(t.url, t);
       }
 
+      // Full-workspace URL → tabId map from experiment API (includes hidden workspaces).
+      // Used for removing tabs in hidden workspaces that browser.tabs.query can't see.
+      const fullUrlToTabId = new Map();
+      for (const [tabId, info] of this.tabMonitor._tabIdToInfo) {
+        fullUrlToTabId.set(info.url, tabId);
+      }
+
       for (const op of patch.operations) {
-        await this._applyOp(op, byUrl, allLocalUrls);
+        await this._applyOp(op, byUrl, allLocalUrls, fullUrlToTabId);
       }
     } catch (err) {
       console.error('[TabApplier] applyPatch error:', err);
@@ -204,7 +218,7 @@ class TabApplier {
     }
   }
 
-  async _applyOp(op, byUrl, allLocalUrls) {
+  async _applyOp(op, byUrl, allLocalUrls, fullUrlToTabId) {
     switch (op.type) {
       case 'add_essential': {
         if (!isAllowedUrl(op.tab?.url)) break;
@@ -245,9 +259,14 @@ class TabApplier {
           if (tab) {
             await browser.tabs.remove(tab.id).catch(() => {});
             byUrl.delete(op.url);
+          } else {
+            // Try full-workspace map for hidden workspace tabs
+            const hiddenTabId = fullUrlToTabId.get(op.url);
+            if (hiddenTabId != null) {
+              await browser.tabs.remove(hiddenTabId).catch(() => {});
+              fullUrlToTabId.delete(op.url);
+            }
           }
-          // Remove from allLocalUrls so subsequent add_tab for same URL
-          // can re-create it (e.g. pin toggle: remove from pinnedTabs + add to tabs)
           allLocalUrls.delete(op.url);
         }
         break;
