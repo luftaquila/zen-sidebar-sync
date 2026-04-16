@@ -52,6 +52,13 @@ Zen Browser sidebar sync extension + WebSocket sync server. Syncs essentials, wo
 - Only http/https URLs are captured and synced.
 - SyncIds are URL-based hashes (no timestamp) for stability across extension restarts and cross-device consistency.
 - Server writes are debounced (1s) and atomic (write-tmp + rename).
+- Always send patches after initial sync — never full_state (server merge is additive and loses removals).
+- `force_push` uses `replace: true` to completely replace server state instead of additive merge.
+- `add_essential` removes the tab's URL from `byUrl` after promoting, so the paired `remove_tab` (from workspace→essential move) can't find and close it.
+- Reconnect (auth_ok while `initialSyncDone=true`) uses additive merge + pushes local state to server, preserving offline changes. Distinguished from broadcasts via `isAuthState` flag from sync-client.
+- Folder tab membership changes emit `remove_folder` + `add_folder` instead of `update_folder` (no API to update folder membership in place).
+- Cache invalidation (`invalidateCache()`) runs after every apply to prevent stale experiment/native data from generating echo patches.
+- Apply operations are queued via promise chain to prevent concurrent `applyState`/`applyPatch` overlap.
 - When docs (README.md, CLAUDE.md) describe behavior affected by a code change, always update them together.
 
 ## Known limitations
@@ -59,6 +66,11 @@ Zen Browser sidebar sync extension + WebSocket sync server. Syncs essentials, wo
 - **Hidden workspace tab removal**: `applyState` step 4 (remove tabs not in remote state) only removes active workspace tabs because `browser.tabs.query` doesn't return hidden ones. Tabs removed from remote state in hidden workspaces become zombies until that workspace is activated.
 - **Fallback mode limitations**: Without experiment API or native messaging host, only active workspace tabs are visible. Workspace/folder creation and organization require experiment API — fallback mode can only sync tabs.
 - **Folder rename is remove+add**: Folder syncIds are name-based, so renaming a folder produces a remove_folder + add_folder pair. Tabs are ungrouped by `folder.delete()` then regrouped by `createFolder` via URL matching.
+- **Folder content change is remove+add**: Adding/removing a tab from a folder emits remove_folder + add_folder. Causes brief visual flicker. No Zen API to update folder membership in place.
+- **Pin toggle recreates tab**: Toggling pin state moves a tab between `ws.tabs` and `ws.pinnedTabs`, generating `remove_tab` + `add_tab`. The tab is destroyed and recreated, losing in-page state (scroll position, form data).
+- **Workspace deletion incomplete**: No `removeWorkspace` experiment API. Only workspace tabs are removed; the workspace container itself persists on the remote device.
+- **Stale resurrection on reconnect**: Additive reconnect merge preserves local items, but items deleted by another device while disconnected are re-added when the reconnecting device pushes its state. Without version-tracked operations, this is inherent.
+- **Hash collision risk**: `_hashCode` uses Java's `hashCode` algorithm. Two URLs with the same hash would collide. Unlikely in practice but theoretically possible.
 
 ## Commands
 
