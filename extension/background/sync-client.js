@@ -97,14 +97,14 @@ class SyncClient {
         this.deviceId = msg.deviceId;
         this.onStatusChange?.('connected');
         this._startPing();
-        // Process initial state from server
+        // Process initial state from server (isAuthState=true for reconnect detection)
         if (msg.state) {
-          this.onStateUpdate?.(msg.state, 'server');
+          this.onStateUpdate?.(msg.state, 'server', true);
         }
         break;
 
       case 'state_update':
-        this.onStateUpdate?.(msg.state, msg.sourceDevice);
+        this.onStateUpdate?.(msg.state, msg.sourceDevice, false);
         break;
 
       case 'patch':

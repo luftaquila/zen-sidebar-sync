@@ -61,7 +61,7 @@ function onLocalStateChange(state, patch) {
 
 // --- Remote State Update (from Server, full state) ---
 
-async function onRemoteStateUpdate(remoteState, sourceDevice) {
+async function onRemoteStateUpdate(remoteState, sourceDevice, isAuthState = false) {
   if (sourceDevice === syncClient.deviceId) return;
 
   const totalRemoteTabs = (remoteState.essentials || []).length
@@ -78,8 +78,15 @@ async function onRemoteStateUpdate(remoteState, sourceDevice) {
     // First connect, server has state — additive merge only
     await tabApplier.applyState(remoteState, { addOnly: true });
     initialSyncDone = true;
+  } else if (isAuthState) {
+    // Reconnect (auth_ok while already synced) — additive merge to preserve
+    // local offline changes, then push local state so offline changes propagate
+    await tabApplier.applyState(remoteState, { addOnly: true });
+    if (syncClient.isConnected && tabMonitor.state) {
+      syncClient.sendFullState(tabMonitor.state);
+    }
   } else {
-    // Ongoing sync — full reconciliation
+    // Broadcast from another device or force_pull — full reconciliation
     await tabApplier.applyState(remoteState, { addOnly: false });
   }
 
