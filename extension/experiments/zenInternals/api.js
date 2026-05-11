@@ -54,10 +54,11 @@ function getTabUrl(xulTab) {
     const cur = xulTab.linkedBrowser?.currentURI?.spec;
     if (cur && cur !== "about:blank" && cur !== "") return cur;
   } catch {}
-  try {
-    const utv = xulTab.linkedBrowser?.userTypedValue;
-    if (utv) return utv;
-  } catch {}
+  // For unloaded/lazy tabs only: get the persisted URL from session state.
+  // (Deliberately NOT falling back to linkedBrowser.userTypedValue — that
+  // races with active navigation, reporting a typed-but-not-yet-loaded URL
+  // and triggering a spurious update_tab that then fails to apply on the
+  // receiver when the actual URL load completes elsewhere.)
   try {
     const SS = ss();
     if (SS) {
