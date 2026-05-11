@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "name": "Zen Sidebar Sync",
-  "version": "1.14.1",
+  "version": "1.14.2",
   "description": "Real-time sidebar sync for Zen Browser — essentials, workspaces, and open tabs across devices",
   "author": "luftaquila",
 

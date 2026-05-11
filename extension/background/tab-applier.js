@@ -42,17 +42,39 @@ class TabApplier {
   // --- Full state apply ---
 
   async applyState(remoteState, opts) {
-    return this._enqueue(() => this._applyState(remoteState, opts));
+    // Outer guard: if anything in _applyState's finally block throws
+    // (e.g. a transient captureFullState failure) the inner
+    // setApplying(false) might not run, leaving _applyingCount stuck
+    // above 0 forever — which silently disables every future tab
+    // event. This wrapper decrements one extra time so the count
+    // never strands above 0 on an error path.
+    return this._enqueue(async () => {
+      try { return await this._applyState(remoteState, opts); }
+      finally { this.tabMonitor.setApplying(false); }
+    });
   }
 
   async applyPatch(patch) {
-    return this._enqueue(() => this._applyPatch(patch));
+    return this._enqueue(async () => {
+      try { return await this._applyPatch(patch); }
+      finally { this.tabMonitor.setApplying(false); }
+    });
   }
 
   async _applyState(remoteState, { addOnly = false } = {}) {
     this.tabMonitor.setApplying(true);
     try {
       if (!remoteState || !Array.isArray(remoteState.tabs)) return;
+
+      // Destructive replace ("Replace local") needs an up-to-date view
+      // of the local workspaces/folders before we start mutating; a
+      // stale tabMonitor.state can otherwise drive the removal pass
+      // into deleting items that DO exist remotely (we just hadn't
+      // captured them yet) or skip items that should be removed.
+      if (!addOnly) {
+        this.tabMonitor.invalidateCache();
+        await this.tabMonitor.captureFullState({ silent: true, skipGuard: true });
+      }
 
       const local = this.tabMonitor.state || {};
       const localTabsByUrl = new Map((local.tabs || []).map(t => [t.url, t]));
@@ -637,9 +659,15 @@ class TabApplier {
     }
     // Bind the cross-device syncUuid to the just-created tab so subsequent
     // ops (update_tab/remove_tab) from the source device can locate it
-    // here regardless of URL changes.
+    // here regardless of URL changes. If this binding fails, every
+    // future op from the source side fails to find the local tab and
+    // ends up creating a duplicate — surface the warning so we notice.
     if (remoteTab.syncUuid) {
-      await browser.zenInternals.setTabSyncUuid({ tabId: tab.id, syncUuid: remoteTab.syncUuid }).catch(() => {});
+      const r = await browser.zenInternals.setTabSyncUuid({ tabId: tab.id, syncUuid: remoteTab.syncUuid })
+        .catch(e => ({ success: false, error: e?.message }));
+      if (!r?.success) {
+        console.warn('[TabApplier] setTabSyncUuid failed for', remoteTab.url, '—', r?.error);
+      }
     }
     // Tell the monitor about the just-created tab so the next (silent)
     // recapture doesn't lose it just because currentURI is still

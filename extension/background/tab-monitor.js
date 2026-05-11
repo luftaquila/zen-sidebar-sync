@@ -97,7 +97,9 @@ class TabMonitor {
     // and gZenWorkspaces in-memory.
     setInterval(() => {
       if (this._applyingCount === 0) {
-        this.captureFullState({ silent: false }).catch(() => {});
+        this.captureFullState({ silent: false }).catch(err => {
+          console.warn('[TabMonitor] periodic capture error:', err?.message || err);
+        });
       }
     }, this.PERIODIC_CAPTURE_MS);
 
@@ -196,6 +198,19 @@ class TabMonitor {
       const newState = (source && Array.isArray(source.tabs))
         ? await this._buildFromNative(source)
         : await this._buildFromBrowserApi();
+
+      // Fallback mode (no native, no runtime API) returns empty tabs
+      // and folders intentionally. If we let that overwrite the
+      // current state, the next real capture would diff against a
+      // false-empty baseline and emit a flood of add_tab ops for
+      // every tab the user has — re-seeding the server with duplicates
+      // or, worse, racing with peers' state. Skip the diff entirely
+      // when the source couldn't see tabs; refresh only workspaces
+      // (those come from per-window session data and are reliable).
+      if (newState._fallback) {
+        this.state.workspaces = newState.workspaces;
+        return;
+      }
 
       // Inject any in-flight (just-created via apply) tabs that haven't
       // surfaced in the runtime capture yet. Without this, silent recapture

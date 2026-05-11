@@ -397,15 +397,26 @@ function mergeBySyncId(serverItems, clientItems) {
   return Array.from(merged.values());
 }
 
+// Stable sort: primary by position, secondary by syncId so equal
+// positions don't reorder across requests / server restarts. Without
+// the tiebreaker, two clients could end up with different final
+// orderings even after seeing the same data.
+function stableSort(items) {
+  return items.slice().sort((a, b) => {
+    const dp = (a.position ?? 0) - (b.position ?? 0);
+    if (dp !== 0) return dp;
+    const sa = a.syncId || '';
+    const sb = b.syncId || '';
+    return sa < sb ? -1 : sa > sb ? 1 : 0;
+  });
+}
+
 function mergeState(server, client) {
   return {
     schemaVersion: SCHEMA_VERSION,
-    workspaces: mergeBySyncId(server.workspaces, client.workspaces)
-      .sort((a, b) => (a.position ?? 0) - (b.position ?? 0)),
-    folders: mergeBySyncId(server.folders, client.folders)
-      .sort((a, b) => (a.position ?? 0) - (b.position ?? 0)),
-    tabs: mergeBySyncId(server.tabs, client.tabs)
-      .sort((a, b) => (a.position ?? 0) - (b.position ?? 0)),
+    workspaces: stableSort(mergeBySyncId(server.workspaces, client.workspaces)),
+    folders: stableSort(mergeBySyncId(server.folders, client.folders)),
+    tabs: stableSort(mergeBySyncId(server.tabs, client.tabs)),
     version: server.version,
     lastModified: Date.now(),
   };
@@ -501,9 +512,15 @@ function applyPatch(state, patch) {
         }
         break;
       }
+
+      default:
+        // Unknown op type — log so a client/schema mismatch is visible
+        // rather than silently dropped.
+        console.warn(`[patch] unknown op type: ${op.type}`);
+        break;
     }
   }
-  state.workspaces.sort((a, b) => (a.position ?? 0) - (b.position ?? 0));
-  state.folders.sort((a, b) => (a.position ?? 0) - (b.position ?? 0));
-  state.tabs.sort((a, b) => (a.position ?? 0) - (b.position ?? 0));
+  state.workspaces = stableSort(state.workspaces);
+  state.folders = stableSort(state.folders);
+  state.tabs = stableSort(state.tabs);
 }
