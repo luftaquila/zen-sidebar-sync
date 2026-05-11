@@ -261,15 +261,30 @@ this.zenInternals = class extends ExtensionAPI {
           const out = { workspaces: [], folders: [], tabs: [] };
           try {
             // getWorkspaces(true) goes through ZenSessionStore.getClonedSpaces()
-            // which returns the full persisted shape including the gradient
-            // theme; the default getWorkspaces() reads _workspaceCache which
-            // can hand back themes with empty gradientColors arrays (we saw
-            // this on the wire — every synced workspace ended up with the
-            // default empty theme on receivers).
-            let wsList = [];
-            try { wsList = win.gZenWorkspaces.getWorkspaces(true) || []; } catch {}
-            if (!wsList.length) {
-              try { wsList = win.gZenWorkspaces.getWorkspaces() || []; } catch {}
+            // which returns the persisted shape; getWorkspaces() (no arg)
+            // reads _workspaceCache which includes freshly-created workspaces
+            // that haven't yet been persisted. Need the cache union so the
+            // applier's name-based dedup catches a newly-created workspace
+            // BEFORE Zen flushes it to session store (otherwise apply runs
+            // again 5 seconds later via the periodic capture and creates
+            // a duplicate). Cached entries with the same name dedup to the
+            // first occurrence; live entries take precedence for theme/icon.
+            const live = (() => { try { return win.gZenWorkspaces.getWorkspaces(true) || []; } catch { return []; } })();
+            const cached = (() => { try { return win.gZenWorkspaces.getWorkspaces() || []; } catch { return []; } })();
+            const liveByUuid = new Map(live.map(w => [w.uuid, w]));
+            const seenNames = new Map();
+            const wsList = [];
+            for (const w of live) {
+              if (!w?.name || seenNames.has(w.name)) continue;
+              seenNames.set(w.name, w.uuid);
+              wsList.push(w);
+            }
+            for (const w of cached) {
+              if (!w?.name) continue;
+              if (liveByUuid.has(w.uuid)) continue; // already added from live
+              if (seenNames.has(w.name)) continue;  // duplicate name, skip
+              seenNames.set(w.name, w.uuid);
+              wsList.push(w);
             }
             for (const w of wsList) {
               // Defensive: if a workspace from the cloned-spaces path still
