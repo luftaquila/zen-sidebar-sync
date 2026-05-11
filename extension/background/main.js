@@ -44,6 +44,7 @@ async function init() {
     onPatch: onRemotePatch,
     onDeviceEvent: onDeviceEvent,
     onStatusChange: onSyncStatusChange,
+    onForceDisable: onForceDisable,
   });
 
   if (config.syncEnabled && config.serverUrl && config.syncToken) {
@@ -175,6 +176,19 @@ function onDeviceEvent(event) {
   console.log(`[ZenSync] ${event.type}: ${event.deviceName}`);
 }
 
+// --- Force Disable (admin) ---
+
+async function onForceDisable(reason) {
+  console.log('[ZenSync] Force-disable received:', reason);
+  syncClient.disconnect();
+  syncEnabled = false;
+  initialSyncDone = false;
+  pendingInitialState = null;
+  pendingInitialInfo = null;
+  await browser.storage.local.set({ syncEnabled: false });
+  browser.runtime.sendMessage({ type: 'status_update', status: 'disconnected', forceDisabled: true }).catch(() => {});
+}
+
 // --- Sync Status ---
 
 function onSyncStatusChange(status) {
@@ -250,6 +264,18 @@ async function handleMessage(msg, sender) {
       pendingInitialInfo = null;
       await browser.storage.local.set({ syncEnabled: false });
       browser.runtime.sendMessage({ type: 'status_update', status: 'disconnected', lastSyncTime }).catch(() => {});
+      return { success: true };
+    }
+
+    case 'admin_reset_state': {
+      if (!syncClient.isConnected) return { success: false, error: 'not connected' };
+      syncClient.sendAdminResetState();
+      return { success: true };
+    }
+
+    case 'admin_disable_all': {
+      if (!syncClient.isConnected) return { success: false, error: 'not connected' };
+      syncClient.sendAdminDisableAll();
       return { success: true };
     }
 

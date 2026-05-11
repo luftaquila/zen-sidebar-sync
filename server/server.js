@@ -267,6 +267,37 @@ wss.on('connection', (ws) => {
           break;
         }
 
+        case 'admin_reset_state': {
+          // Any authenticated client can wipe the server state to empty.
+          // Used in conjunction with admin_disable_all to start fresh.
+          state = {
+            schemaVersion: SCHEMA_VERSION,
+            workspaces: [],
+            folders: [],
+            tabs: [],
+            version: 0,
+            lastModified: Date.now(),
+          };
+          scheduleSave();
+          console.log(`[${deviceId}] ADMIN reset state`);
+          ws.send(JSON.stringify({ type: 'admin_ok', action: 'reset_state' }));
+          // Broadcast the empty state so other clients see it immediately.
+          broadcast(ws, { type: 'state_update', state, sourceDevice: 'server' });
+          break;
+        }
+
+        case 'admin_disable_all': {
+          // Tell every connected device (including sender) to disable sync.
+          // Each client will turn off syncEnabled in storage and disconnect.
+          console.log(`[${deviceId}] ADMIN disable all`);
+          const data = JSON.stringify({ type: 'force_disable', reason: 'admin' });
+          for (const [client] of clients) {
+            if (client.readyState === 1) client.send(data);
+          }
+          ws.send(JSON.stringify({ type: 'admin_ok', action: 'disable_all' }));
+          break;
+        }
+
         case 'ping': {
           ws.send(JSON.stringify({ type: 'pong', timestamp: Date.now() }));
           break;

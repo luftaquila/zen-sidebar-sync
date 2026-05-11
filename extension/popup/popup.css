@@ -167,6 +167,34 @@ header {
   border: 1px solid #3a3a5a;
 }
 
+.btn.danger {
+  background: #6b1717;
+  color: #fde0e0;
+  border: 1px solid #a01818;
+}
+.btn.danger:hover {
+  background: #8a1d1d;
+}
+
+.admin-section {
+  margin-top: 12px;
+  padding-top: 8px;
+  border-top: 1px solid #2a2a4a;
+}
+.admin-section summary {
+  cursor: pointer;
+  font-size: 12px;
+  color: #888;
+  margin-bottom: 8px;
+  user-select: none;
+}
+.admin-section summary:hover {
+  color: #ccc;
+}
+.admin-section[open] summary {
+  color: #f87171;
+}
+
 .actions {
   display: flex;
   gap: 8px;

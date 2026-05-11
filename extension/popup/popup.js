@@ -50,6 +50,8 @@ async function init() {
   $('#forcePullBtn').addEventListener('click', forcePull);
   $('#confirmReplaceBtn').addEventListener('click', confirmInitialReplace);
   $('#cancelInitialBtn').addEventListener('click', cancelInitialSync);
+  $('#adminDisableAllBtn').addEventListener('click', adminDisableAll);
+  $('#adminResetStateBtn').addEventListener('click', adminResetState);
 
   for (const id of ['serverUrl', 'syncToken', 'deviceName']) {
     $(`#${id}`).addEventListener('change', onConfigChange);
@@ -161,6 +163,24 @@ async function forcePull() {
     $('#forcePullBtn').textContent = 'Pulled!';
     setTimeout(() => { $('#forcePullBtn').textContent = 'Force Pull'; }, 1500);
   }
+}
+
+async function adminDisableAll() {
+  if (!confirm('Turn off sync on EVERY connected device? Each device will need to be re-enabled manually.')) return;
+  const btn = $('#adminDisableAllBtn');
+  btn.disabled = true; btn.textContent = 'Sending…';
+  await browser.runtime.sendMessage({ type: 'admin_disable_all' });
+  btn.disabled = false; btn.textContent = 'Sent';
+  setTimeout(() => { btn.textContent = 'Disable sync on all'; }, 1500);
+}
+
+async function adminResetState() {
+  if (!confirm('WIPE all server-side sync state? Cannot be undone. Connected devices will see the empty state on next push.')) return;
+  const btn = $('#adminResetStateBtn');
+  btn.disabled = true; btn.textContent = 'Resetting…';
+  await browser.runtime.sendMessage({ type: 'admin_reset_state' });
+  btn.disabled = false; btn.textContent = 'Reset';
+  setTimeout(() => { btn.textContent = 'Reset server state'; }, 1500);
 }
 
 // --- UI ---

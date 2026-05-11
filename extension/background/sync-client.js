@@ -5,7 +5,7 @@
  */
 
 class SyncClient {
-  constructor({ onStateUpdate, onPatch, onDeviceEvent, onStatusChange }) {
+  constructor({ onStateUpdate, onPatch, onDeviceEvent, onStatusChange, onForceDisable }) {
     this.ws = null;
     this.serverUrl = null;
     this.token = null;
@@ -21,6 +21,7 @@ class SyncClient {
     this.onPatch = onPatch;
     this.onDeviceEvent = onDeviceEvent;
     this.onStatusChange = onStatusChange;
+    this.onForceDisable = onForceDisable;
   }
 
   async connect(serverUrl, token, deviceName) {
@@ -127,6 +128,17 @@ class SyncClient {
         // Latency = Date.now() - msg.timestamp (from our ping)
         break;
 
+      case 'force_disable':
+        // Server (or another device acting as admin) requested all clients
+        // disable sync. Pass to orchestrator which will turn off the toggle
+        // and disconnect.
+        this.onForceDisable?.(msg.reason);
+        break;
+
+      case 'admin_ok':
+        // Server ack of an admin action this client initiated.
+        break;
+
       case 'error':
         console.error('[SyncClient] Server error:', msg.message);
         if (msg.message === 'Invalid token') {
@@ -134,6 +146,16 @@ class SyncClient {
         }
         break;
     }
+  }
+
+  sendAdminResetState() {
+    if (!this.connected) return;
+    this.ws.send(JSON.stringify({ type: 'admin_reset_state', deviceId: this.deviceId }));
+  }
+
+  sendAdminDisableAll() {
+    if (!this.connected) return;
+    this.ws.send(JSON.stringify({ type: 'admin_disable_all', deviceId: this.deviceId }));
   }
 
   sendFullState(state, { replace = false } = {}) {
