@@ -314,11 +314,29 @@ function broadcast(sender, msg) {
 }
 
 function isValidV2State(s) {
-  return s
-    && s.schemaVersion === SCHEMA_VERSION
-    && Array.isArray(s.workspaces)
-    && Array.isArray(s.folders)
-    && Array.isArray(s.tabs);
+  if (!s
+    || s.schemaVersion !== SCHEMA_VERSION
+    || !Array.isArray(s.workspaces)
+    || !Array.isArray(s.folders)
+    || !Array.isArray(s.tabs)) {
+    return false;
+  }
+  // Referential integrity: every non-essential tab's workspaceSyncId
+  // MUST resolve to a workspace in the same payload. A tab with an
+  // unresolvable workspaceSyncId cannot be placed by any client
+  // (`tabMonitor.workspaceUuidBySyncId.get(...)` returns undefined),
+  // so the client falls back to creating the tab in its currently
+  // active workspace — the "all tabs dump into current space" bug.
+  // Reject the whole payload so the publisher fixes its capture.
+  const wsIds = new Set(s.workspaces.map(w => w?.syncId).filter(Boolean));
+  for (const t of s.tabs) {
+    if (t?.kind === 'essential') continue;
+    if (!t?.workspaceSyncId || !wsIds.has(t.workspaceSyncId)) {
+      console.warn(`[validate] tab ${t?.syncId} kind=${t?.kind} has dangling workspaceSyncId=${t?.workspaceSyncId}`);
+      return false;
+    }
+  }
+  return true;
 }
 
 function mergeBySyncId(serverItems, clientItems) {
@@ -406,6 +424,16 @@ function applyPatch(state, patch) {
 
       case 'add_tab':
         if (op.tab?.syncId && !state.tabs.some(t => t.syncId === op.tab.syncId)) {
+          // Same referential-integrity guard as isValidV2State: a non-
+          // essential tab without a known workspaceSyncId would land on
+          // every subscriber's active workspace. Reject the op instead.
+          if (op.tab.kind !== 'essential') {
+            const wsExists = state.workspaces.some(w => w.syncId === op.tab.workspaceSyncId);
+            if (!op.tab.workspaceSyncId || !wsExists) {
+              console.warn(`[patch] dropping add_tab ${op.tab.syncId} — dangling workspaceSyncId=${op.tab.workspaceSyncId}`);
+              break;
+            }
+          }
           state.tabs.push({ ...op.tab, lastModified: now });
         }
         break;
@@ -417,6 +445,16 @@ function applyPatch(state, patch) {
       case 'update_tab': {
         const t = state.tabs.find(x => x.syncId === op.syncId);
         if (t && op.changes) {
+          // If the update would change workspaceSyncId, ensure target
+          // workspace exists. Silently dropping a workspace move leaves
+          // the tab anchored to a stale workspace; rejecting the update
+          // is preferable to corrupting the state.
+          if (op.changes.workspaceSyncId !== undefined
+              && op.changes.workspaceSyncId !== null
+              && !state.workspaces.some(w => w.syncId === op.changes.workspaceSyncId)) {
+            console.warn(`[patch] dropping update_tab ${op.syncId} — would set dangling workspaceSyncId=${op.changes.workspaceSyncId}`);
+            break;
+          }
           Object.assign(t, pick(op.changes, TAB_PROPS));
           t.lastModified = now;
         }

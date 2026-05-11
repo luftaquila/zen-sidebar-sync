@@ -60,20 +60,55 @@ class TabApplier {
       const remoteTotal = (remoteState.tabs || []).length;
       if (!addOnly && remoteTotal === 0) addOnly = true;
 
-      // 1. Workspaces — create missing, rename mismatched.
+      // 1. Workspaces — ensure every remote workspace has a local UUID
+      // mapping before we place any tabs. Three resolution paths:
+      //   a) syncId matches local (tabMonitor already populated the map).
+      //   b) name matches an existing local workspace (different syncId on
+      //      first sync, or stale cache after rename) — bind that UUID to
+      //      the remote syncId instead of creating a duplicate.
+      //   c) no match — createWorkspace; if it fails (e.g. a same-named
+      //      workspace already exists in Zen but isn't in tabMonitor.state
+      //      yet because captureFullState used the browser-API fallback),
+      //      re-query native data and pick up the existing UUID.
+      // Without these fallbacks, an unresolved workspace leaves
+      // workspaceUuidBySyncId unset, then _createAndPlaceTab silently
+      // drops every incoming tab into the active workspace.
       for (const ws of (remoteState.workspaces || [])) {
-        const localWs = localWsBySyncId.get(ws.syncId);
-        if (!localWs) {
-          const r = await browser.zenInternals.createWorkspace({ name: ws.name, icon: ws.icon });
-          if (r?.success && r.uuid) {
-            this.tabMonitor.workspaceUuidByName.set(ws.name, r.uuid);
-            this.tabMonitor.workspaceUuidBySyncId.set(ws.syncId, r.uuid);
-          } else {
-            console.warn('[TabApplier] createWorkspace failed:', ws.name, r?.error);
+        // (a) syncId match
+        if (this.tabMonitor.workspaceUuidBySyncId.has(ws.syncId)) {
+          // Rename if metadata drifted (still using existing UUID).
+          const localWs = localWsBySyncId.get(ws.syncId);
+          if (localWs && (localWs.name !== ws.name || localWs.icon !== ws.icon)) {
+            const uuid = this.tabMonitor.workspaceUuidBySyncId.get(ws.syncId);
+            if (uuid) await browser.zenInternals.renameWorkspace({ uuid, name: ws.name, icon: ws.icon });
           }
-        } else if (localWs.name !== ws.name || localWs.icon !== ws.icon) {
-          const uuid = this.tabMonitor.workspaceUuidBySyncId.get(ws.syncId);
-          if (uuid) await browser.zenInternals.renameWorkspace({ uuid, name: ws.name, icon: ws.icon });
+          continue;
+        }
+        // (b) name match
+        const byName = this.tabMonitor.workspaceUuidByName.get(ws.name);
+        if (byName) {
+          this.tabMonitor.workspaceUuidBySyncId.set(ws.syncId, byName);
+          continue;
+        }
+        // (c) create, with native re-query fallback
+        const r = await browser.zenInternals.createWorkspace({ name: ws.name, icon: ws.icon })
+          .catch(err => ({ success: false, error: err?.message }));
+        let uuid = (r?.success && r.uuid) ? r.uuid : null;
+        if (!uuid) {
+          // Fallback: native session store may already have a workspace
+          // with this name (race vs createWorkspace, or different casing).
+          const native = await this.tabMonitor._getNativeData().catch(() => null);
+          const match = native?.workspaces?.find(w => (w.name || '').trim() === ws.name);
+          uuid = match?.uuid || null;
+          if (uuid) {
+            console.warn('[TabApplier] createWorkspace failed but native has', ws.name, '— binding existing UUID');
+          }
+        }
+        if (uuid) {
+          this.tabMonitor.workspaceUuidByName.set(ws.name, uuid);
+          this.tabMonitor.workspaceUuidBySyncId.set(ws.syncId, uuid);
+        } else {
+          console.warn('[TabApplier] No UUID for workspace, tabs will be skipped:', ws.name, r?.error);
         }
       }
 
@@ -294,6 +329,23 @@ class TabApplier {
 
   async _createAndPlaceTab(remoteTab) {
     if (!isAllowedUrl(remoteTab.url)) return null;
+    // Pre-flight: a non-essential tab MUST resolve to a known workspace
+    // UUID before we materialize it. browser.tabs.create() places the new
+    // tab in whatever workspace is currently active; if the subsequent
+    // moveTabToWorkspace can't find a target UUID it silently no-ops,
+    // and every unresolved remote tab piles up in the user's current
+    // workspace. Skip instead — the next sync round will retry once the
+    // mapping is populated (e.g. after captureFullState reads native).
+    if (remoteTab.kind !== 'essential' && remoteTab.workspaceSyncId) {
+      const wsUuid = this.tabMonitor.workspaceUuidBySyncId.get(remoteTab.workspaceSyncId);
+      if (!wsUuid) {
+        console.warn(
+          '[TabApplier] Skipping tab — no local workspace UUID for',
+          remoteTab.workspaceSyncId, ':', remoteTab.url,
+        );
+        return null;
+      }
+    }
     let tab;
     try {
       tab = await browser.tabs.create({ url: remoteTab.url, active: false });
