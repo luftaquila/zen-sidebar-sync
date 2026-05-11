@@ -427,4 +427,5 @@ function diffById(oldList, newList, propsToCompare, onAdd, onUpdate, onRemove) {
   }
 }
 
+export { makeSyncId };
 export default TabMonitor;

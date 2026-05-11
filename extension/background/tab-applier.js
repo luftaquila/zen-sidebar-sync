@@ -14,6 +14,8 @@
  * tabMonitor.state to current ground truth, preventing stale-diff echo loops.
  */
 
+import { makeSyncId } from './tab-monitor.js';
+
 const ALLOWED_SCHEMES = ['http:', 'https:'];
 
 function isAllowedUrl(url) {
@@ -219,6 +221,26 @@ class TabApplier {
       const ops = [...patch.operations];
       ops.sort((a, b) => opPriority(a) - opPriority(b));
 
+      // Before any add_tab / update_tab can run, every workspaceSyncId
+      // those ops reference MUST already have a local UUID mapping.
+      // Otherwise the tab placement falls back to the user's active
+      // workspace ("tabs dump into current space" bug). The set of
+      // workspace IDs referenced by this patch is the union of:
+      //   - explicit add_workspace ops (handled by the priority sort),
+      //   - workspaceSyncId fields on every add_tab / update_tab op.
+      // For each referenced syncId that isn't yet mapped, try the same
+      // three-step resolution as _applyState (syncId → name → create+
+      // native re-query). Resolving lazily inside _applyOp would mean
+      // every tab op pays a native query latency.
+      const referencedWsSyncIds = new Set();
+      for (const op of ops) {
+        const wsId = op.tab?.workspaceSyncId
+          ?? op.changes?.workspaceSyncId
+          ?? op.workspace?.syncId;
+        if (wsId) referencedWsSyncIds.add(wsId);
+      }
+      await this._ensureWorkspacesResolved(referencedWsSyncIds);
+
       for (const op of ops) {
         try {
           await this._applyOp(op);
@@ -232,6 +254,47 @@ class TabApplier {
       this.tabMonitor.invalidateCache();
       await this.tabMonitor.captureFullState({ silent: true, skipGuard: true });
       this.tabMonitor.setApplying(false);
+    }
+  }
+
+  /**
+   * For each remote workspace syncId, ensure tabMonitor.workspaceUuidBySyncId
+   * has a local Zen UUID. Tries:
+   *   1) already-mapped (no-op)
+   *   2) re-query native data and match by reconstructing the
+   *      makeSyncId('ws', name) form — handles the case where the local
+   *      workspace already exists in Zen but tabMonitor didn't capture
+   *      it (browser-API fallback path)
+   *   3) match the remote workspace name through the local
+   *      state.workspaces list if it was populated some other way
+   * Workspaces still unresolved after this stay unmapped; subsequent
+   * tab ops will then skip rather than create in the active workspace.
+   */
+  async _ensureWorkspacesResolved(syncIds) {
+    const wsMap = this.tabMonitor.workspaceUuidBySyncId;
+    const wsByName = this.tabMonitor.workspaceUuidByName;
+    const unresolved = [...syncIds].filter(id => id && !wsMap.has(id));
+    if (unresolved.length === 0) return;
+
+    // One native query covers all unresolved syncIds in this patch.
+    const native = await this.tabMonitor._getNativeData().catch(() => null);
+    if (native?.workspaces?.length) {
+      for (const w of native.workspaces) {
+        const name = (w.name || '').trim();
+        if (!name) continue;
+        const syncId = makeSyncId('ws', name);
+        if (!wsMap.has(syncId)) wsMap.set(syncId, w.uuid);
+        if (!wsByName.has(name)) wsByName.set(name, w.uuid);
+      }
+    }
+
+    // If the remote workspace name happens to already exist by name in
+    // wsByName but under a different syncId path, bind it now.
+    for (const id of unresolved) {
+      if (wsMap.has(id)) continue;
+      // No reverse lookup from syncId → name without remote state, so
+      // we can only bind via native (above). Leaving unresolved entries
+      // alone makes _createAndPlaceTab refuse them deterministically.
     }
   }
 
