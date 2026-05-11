@@ -24,11 +24,30 @@ function isAllowedUrl(url) {
 class TabApplier {
   constructor(tabMonitor) {
     this.tabMonitor = tabMonitor;
+    // Serial Promise chain: prevents concurrent applyState/applyPatch from
+    // racing. Two patches arriving fast (or a force_pull during a patch)
+    // would otherwise read mid-mutation state and corrupt the maps.
+    this._queue = Promise.resolve();
+  }
+
+  _enqueue(fn) {
+    this._queue = this._queue.then(fn).catch(err => {
+      console.error('[TabApplier] queue error:', err);
+    });
+    return this._queue;
   }
 
   // --- Full state apply ---
 
-  async applyState(remoteState, { addOnly = false } = {}) {
+  async applyState(remoteState, opts) {
+    return this._enqueue(() => this._applyState(remoteState, opts));
+  }
+
+  async applyPatch(patch) {
+    return this._enqueue(() => this._applyPatch(patch));
+  }
+
+  async _applyState(remoteState, { addOnly = false } = {}) {
     this.tabMonitor.setApplying(true);
     try {
       if (!remoteState || !Array.isArray(remoteState.tabs)) return;
@@ -146,14 +165,17 @@ class TabApplier {
     } catch (err) {
       console.error('[TabApplier] applyState error:', err);
     } finally {
-      await this.tabMonitor.captureFullState({ silent: true });
+      // Bust the native cache so post-apply recapture sees fresh data,
+      // not the cached snapshot from before our mutations.
+      this.tabMonitor.invalidateCache();
+      await this.tabMonitor.captureFullState({ silent: true, skipGuard: true });
       this.tabMonitor.setApplying(false);
     }
   }
 
   // --- Patch apply ---
 
-  async applyPatch(patch) {
+  async _applyPatch(patch) {
     this.tabMonitor.setApplying(true);
     try {
       if (!patch || !Array.isArray(patch.operations)) return;
@@ -172,7 +194,8 @@ class TabApplier {
     } catch (err) {
       console.error('[TabApplier] applyPatch error:', err);
     } finally {
-      await this.tabMonitor.captureFullState({ silent: true });
+      this.tabMonitor.invalidateCache();
+      await this.tabMonitor.captureFullState({ silent: true, skipGuard: true });
       this.tabMonitor.setApplying(false);
     }
   }

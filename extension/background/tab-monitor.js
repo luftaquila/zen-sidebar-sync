@@ -63,6 +63,15 @@ class TabMonitor {
     this.debounceTimer = setTimeout(() => this.captureFullState(), this.DEBOUNCE_MS);
   }
 
+  /**
+   * Bust the native cache so the next captureFullState fetches fresh data
+   * instead of returning the stale snapshot taken before an apply.
+   */
+  invalidateCache() {
+    this._nativeData = null;
+    this._nativeLastFetch = 0;
+  }
+
   // --- Native Messaging ---
 
   async _getNativeData() {
@@ -85,24 +94,41 @@ class TabMonitor {
         return this._nativeData;
       }
       console.warn('[TabMonitor] Native host error:', resp?.error);
+      // Successful round-trip but empty data is transient (browser starting up,
+      // session not yet loaded). Don't disable permanently.
+      return null;
     } catch (e) {
       if (this._nativeAvailable === null) {
         console.warn('[TabMonitor] Native messaging unavailable:', e.message);
       }
+      this._nativeAvailable = false;
+      return null;
     }
-    this._nativeAvailable = false;
-    return null;
   }
 
   // --- State Capture ---
 
-  async captureFullState({ silent = false } = {}) {
+  async captureFullState({ silent = false, skipGuard = false } = {}) {
     try {
       const nativeData = await this._getNativeData();
 
       const newState = (nativeData && Array.isArray(nativeData.tabs))
         ? await this._buildFromNative(nativeData)
         : await this._buildFromBrowserApi();
+
+      // Reject captures where the tab count collapses unexpectedly. This catches
+      // partial native reads (e.g. session store mid-write) that would otherwise
+      // diff into a flood of remove_tab ops and propagate as mass deletion.
+      // Post-apply recaptures use skipGuard since the drop may be intentional
+      // (we just received a state where many tabs were removed).
+      if (!skipGuard) {
+        const oldCount = (this.state.tabs || []).length;
+        const newCount = (newState.tabs || []).length;
+        if (oldCount > 5 && newCount < oldCount * 0.3) {
+          console.warn(`[TabMonitor] Capture rejected: tab count dropped ${oldCount} → ${newCount} (>70% loss)`);
+          return;
+        }
+      }
 
       const patch = this._computePatch(this.state, newState);
       this.state = newState;

@@ -23,6 +23,54 @@ function pick(obj, keys) {
   return out;
 }
 
+// --- Logging ---
+
+function logState(label) {
+  const w = (state.workspaces || []).length;
+  const f = (state.folders || []).length;
+  const t = (state.tabs || []);
+  const byKind = { essential: 0, pinned: 0, normal: 0 };
+  for (const x of t) byKind[x.kind] = (byKind[x.kind] || 0) + 1;
+  console.log(`[state] ${label} | v${state.version} | ws:${w} folders:${f} tabs:${t.length} (ess:${byKind.essential} pin:${byKind.pinned} norm:${byKind.normal})`);
+}
+
+function logPatchOp(op) {
+  const trunc = (s) => (s || '').toString().slice(0, 70);
+  switch (op.type) {
+    case 'add_tab':       return `add_tab ${op.tab?.kind} ${trunc(op.tab?.url)}`;
+    case 'update_tab':    return `update_tab ${trunc(op.tab?.url || op.syncId)} ${JSON.stringify(op.changes).slice(0, 80)}`;
+    case 'remove_tab':    return `remove_tab ${trunc(op.url || op.syncId)}`;
+    case 'add_workspace': return `add_workspace "${op.workspace?.name}"`;
+    case 'update_workspace': return `update_workspace ${op.syncId} ${JSON.stringify(op.changes).slice(0, 60)}`;
+    case 'remove_workspace': return `remove_workspace ${op.syncId}`;
+    case 'add_folder':    return `add_folder "${op.folder?.name}" ws=${op.folder?.workspaceSyncId}`;
+    case 'update_folder': return `update_folder ${op.syncId} ${JSON.stringify(op.changes).slice(0, 60)}`;
+    case 'remove_folder': return `remove_folder ${op.syncId}`;
+    default:              return op.type;
+  }
+}
+
+// --- Safety guards ---
+
+function countRemovals(patch, st) {
+  let n = 0;
+  for (const op of patch.operations) {
+    if (op.type === 'remove_tab' || op.type === 'remove_folder' || op.type === 'remove_essential') {
+      n++;
+    } else if (op.type === 'remove_workspace') {
+      // Workspace removal cascades to its tabs + folders; count those too.
+      n++;
+      n += (st.tabs || []).filter(t => t.workspaceSyncId === op.syncId).length;
+      n += (st.folders || []).filter(f => f.workspaceSyncId === op.syncId).length;
+    }
+  }
+  return n;
+}
+
+function countStateItems(st) {
+  return (st.workspaces || []).length + (st.folders || []).length + (st.tabs || []).length;
+}
+
 function emptyState() {
   return {
     schemaVersion: SCHEMA_VERSION,
@@ -158,10 +206,25 @@ wss.on('connection', (ws) => {
             ws.send(JSON.stringify({ type: 'error', message: `Invalid state structure (expected schemaVersion ${SCHEMA_VERSION})` }));
             break;
           }
-          state = mergeState(state, msg.state);
+          if (msg.replace) {
+            // Force-push: caller asserts authority. Replace server state outright.
+            state = {
+              schemaVersion: SCHEMA_VERSION,
+              workspaces: msg.state.workspaces,
+              folders: msg.state.folders,
+              tabs: msg.state.tabs,
+              version: state.version,
+              lastModified: Date.now(),
+            };
+            console.log(`[${msg.deviceId || deviceId}] ← full_state REPLACE`);
+          } else {
+            state = mergeState(state, msg.state);
+            console.log(`[${msg.deviceId || deviceId}] ← full_state MERGE`);
+          }
           state.version++;
           state.lastModified = Date.now();
           scheduleSave();
+          logState('after full_state');
 
           ws.send(JSON.stringify({ type: 'state_accepted', version: state.version }));
           broadcast(ws, { type: 'state_update', state, sourceDevice: deviceId });
@@ -173,10 +236,23 @@ wss.on('connection', (ws) => {
             ws.send(JSON.stringify({ type: 'error', message: 'Invalid patch structure' }));
             break;
           }
+          // Mass-removal guard: a corrupted capture should not nuke the world.
+          const removals = countRemovals(msg.patch, state);
+          const current = countStateItems(state);
+          if (current > 5 && removals > current * 0.5) {
+            console.warn(`[${deviceId}] REJECTED patch: ${removals}/${current} removals (>50%)`);
+            for (const op of msg.patch.operations) console.warn(`  ${logPatchOp(op)}`);
+            ws.send(JSON.stringify({ type: 'error', message: 'Patch rejected: too many removals' }));
+            break;
+          }
+          console.log(`[${deviceId}] ← patch (${msg.patch.operations.length} ops)`);
+          for (const op of msg.patch.operations) console.log(`  ${logPatchOp(op)}`);
+
           applyPatch(state, msg.patch);
           state.version++;
           state.lastModified = Date.now();
           scheduleSave();
+          logState('after patch');
 
           ws.send(JSON.stringify({ type: 'patch_accepted', version: state.version }));
           broadcast(ws, { type: 'patch', patch: msg.patch, version: state.version, sourceDevice: deviceId });

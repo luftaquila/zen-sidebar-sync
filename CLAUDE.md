@@ -68,9 +68,16 @@ The patch op set: `add/remove/update` × `workspace/folder/tab`. Every transitio
 - Apply order on patch: ops sorted by `opPriority` (workspace add → folder add → tab add → tab update → tab remove → folder remove → workspace remove).
 - Workspace syncIds are name-based (not Zen UUID) for cross-device consistency. Folder syncIds incorporate the full path so nested folders with the same name don't collide.
 - Server merges by syncId; conflicts resolve by `lastModified` (last write wins per record). The `remove_workspace` op cascades to drop folders/tabs anchored to it; `remove_folder` orphans tabs to top-level pinned (folderSyncId becomes null).
-- After every apply (state or patch), `captureFullState({ silent: true })` immediately recaptures browser state to prevent stale diffs triggering echo loops.
+- After every apply (state or patch), `captureFullState({ silent: true, skipGuard: true })` immediately recaptures browser state to prevent stale diffs triggering echo loops. `invalidateCache()` is called first so the recapture sees post-apply data, not the cached snapshot.
 - `_applyingCount` counter guards against tab events during apply; recapture runs while guard is still held.
 - Debounce of 300ms on tab events before state capture.
+- **Apply queue**: `TabApplier` serializes `applyState`/`applyPatch` through a Promise chain so two patches arriving back-to-back (or a force_pull during a patch) don't race and corrupt the maps.
+- **Always send patches after initial sync**: large local changes still go as a patch, never as `full_state`. Server's full_state merges by syncId and would not propagate removals, causing stale tab resurrection.
+- **`replace` mode** on `full_state`: when the client sets `{replace: true}`, the server replaces state outright instead of merging. Used by `force_push` so the user can declare local state as authoritative.
+- **Reconnect path** preserves offline changes: when `auth_ok` arrives while `initialSyncDone=true`, the orchestrator does an additive merge of remote state then pushes local state. A full reconciliation would otherwise delete tabs opened during the disconnect.
+- **Capture safety guard**: a capture whose unique-URL tab count drops below 30% of the previous capture is rejected. This catches partial native reads (e.g. session store mid-write) that would otherwise diff into a flood of `remove_tab` ops and propagate as mass deletion. Post-apply recaptures use `skipGuard: true` since the drop may be intentional.
+- **Server patch safety guard**: a patch whose removal count exceeds 50% of the current state items is rejected with an error message. Second line of defense behind the capture guard.
+- **Transient native-host empty responses** do not permanently disable the native messaging path. Only a connection-level exception flips `_nativeAvailable` to `false`.
 - Patch property updates are allowlisted (TAB_PROPS, FOLDER_PROPS, WS_PROPS) to prevent state corruption.
 - Only http/https URLs are captured and synced.
 - Server writes are debounced (1s) and atomic (write-tmp + rename).

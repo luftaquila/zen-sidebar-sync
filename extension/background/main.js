@@ -53,10 +53,11 @@ async function init() {
 function onLocalStateChange(state, patch) {
   if (!syncEnabled || !syncClient.isConnected || !initialSyncDone) return;
 
-  if (patch.operations.length > 0 && patch.operations.length <= 10) {
+  // Always send patches — server full_state merge is additive on syncId
+  // and would not propagate removals, causing stale tab resurrection.
+  // For very large changes, the patch is still the right wire format.
+  if (patch.operations.length > 0) {
     syncClient.sendPatch(patch);
-  } else if (patch.operations.length > 0) {
-    syncClient.sendFullState(state);
   }
 
   lastSyncTime = Date.now();
@@ -64,7 +65,7 @@ function onLocalStateChange(state, patch) {
 
 // --- Remote State Update (from Server, full state) ---
 
-async function onRemoteStateUpdate(remoteState, sourceDevice) {
+async function onRemoteStateUpdate(remoteState, sourceDevice, isAuthState = false) {
   if (sourceDevice === syncClient.deviceId) return;
 
   if (!isCompatibleState(remoteState)) {
@@ -75,18 +76,35 @@ async function onRemoteStateUpdate(remoteState, sourceDevice) {
   }
   schemaError = null;
 
-  if (!initialSyncDone) {
-    const totalRemoteTabs = (remoteState.tabs || []).length;
+  const totalRemoteTabs = (remoteState.tabs || []).length;
 
+  if (!initialSyncDone) {
     if (totalRemoteTabs === 0) {
+      // Server empty — seed from local.
       if (syncClient.isConnected && tabMonitor.state) {
         syncClient.sendFullState(tabMonitor.state);
       }
     } else {
+      // Initial connect with server data — additive merge.
       await tabApplier.applyState(remoteState, { addOnly: true });
     }
     initialSyncDone = true;
+  } else if (isAuthState) {
+    // Reconnect (auth_ok while already synced) — preserve offline changes:
+    // additive merge of remote, then push local state so any changes made
+    // while disconnected propagate to the server. Otherwise full
+    // reconciliation would delete tabs opened during disconnect.
+    if (totalRemoteTabs === 0 && syncClient.isConnected && tabMonitor.state) {
+      // Server forgot everything (reset?). Re-seed from local.
+      syncClient.sendFullState(tabMonitor.state);
+    } else {
+      await tabApplier.applyState(remoteState, { addOnly: true });
+      if (syncClient.isConnected && tabMonitor.state) {
+        syncClient.sendFullState(tabMonitor.state);
+      }
+    }
   } else {
+    // Broadcast from another device or force_pull — full reconciliation.
     await tabApplier.applyState(remoteState, { addOnly: false });
   }
 
@@ -173,7 +191,8 @@ async function handleMessage(msg, sender) {
 
     case 'force_push':
       if (syncClient.isConnected && tabMonitor.state) {
-        syncClient.sendFullState(tabMonitor.state);
+        // Replace mode: server state is completely replaced with local state.
+        syncClient.sendFullState(tabMonitor.state, { replace: true });
         return { success: true };
       }
       return { success: false, error: 'Not connected' };

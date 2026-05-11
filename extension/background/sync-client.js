@@ -97,9 +97,11 @@ class SyncClient {
         this.deviceId = msg.deviceId;
         this.onStatusChange?.('connected');
         this._startPing();
-        // Process initial state from server
+        // Process initial state from server. Flag isAuthState=true so the
+        // orchestrator can distinguish reconnect from broadcast (offline
+        // changes must be preserved on reconnect).
         if (msg.state) {
-          this.onStateUpdate?.(msg.state, 'server');
+          this.onStateUpdate?.(msg.state, 'server', true);
         }
         break;
 
@@ -134,11 +136,12 @@ class SyncClient {
     }
   }
 
-  sendFullState(state) {
+  sendFullState(state, { replace = false } = {}) {
     if (!this.connected) return;
     this.ws.send(JSON.stringify({
       type: 'full_state',
       state,
+      replace,
       deviceId: this.deviceId,
     }));
   }
