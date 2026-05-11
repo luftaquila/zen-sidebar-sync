@@ -49,6 +49,7 @@ async function init() {
   $('#forcePushBtn').addEventListener('click', forcePush);
   $('#forcePullBtn').addEventListener('click', forcePull);
   $('#confirmReplaceBtn').addEventListener('click', confirmInitialReplace);
+  $('#confirmPushBtn').addEventListener('click', confirmInitialPush);
   $('#cancelInitialBtn').addEventListener('click', cancelInitialSync);
   $('#adminDisableAllBtn').addEventListener('click', adminDisableAll);
   $('#adminResetStateBtn').addEventListener('click', adminResetState);
@@ -92,12 +93,21 @@ function customConfirm(message, { okText = 'OK', okClass = 'primary' } = {}) {
 }
 
 async function confirmInitialReplace() {
-  if (!(await customConfirm('Replace local tabs and workspaces with the server\'s state?', { okText: 'Replace', okClass: 'danger' }))) return;
+  if (!(await customConfirm('Replace LOCAL tabs and workspaces with the server\'s state?', { okText: 'Replace local', okClass: 'danger' }))) return;
   const btn = $('#confirmReplaceBtn');
   btn.disabled = true; btn.textContent = 'Applying…';
   await browser.runtime.sendMessage({ type: 'confirm_initial_replace' });
   $('#initialSyncPrompt').classList.add('hidden');
-  btn.disabled = false; btn.textContent = 'Replace local';
+  btn.disabled = false; btn.textContent = 'Replace local (use server)';
+}
+
+async function confirmInitialPush() {
+  if (!(await customConfirm('Overwrite SERVER state with this device\'s local? Other connected devices will see the replaced state.', { okText: 'Push local', okClass: 'danger' }))) return;
+  const btn = $('#confirmPushBtn');
+  btn.disabled = true; btn.textContent = 'Pushing…';
+  await browser.runtime.sendMessage({ type: 'confirm_initial_push' });
+  $('#initialSyncPrompt').classList.add('hidden');
+  btn.disabled = false; btn.textContent = 'Push local (overwrite server)';
 }
 
 async function cancelInitialSync() {
@@ -109,18 +119,20 @@ async function cancelInitialSync() {
 function renderInitialSyncPrompt(info) {
   const sec = $('#initialSyncPrompt');
   if (!info) { sec.classList.add('hidden'); return; }
+  const intro = $('#initialSyncIntro');
+  intro.textContent = info.serverEmpty
+    ? 'Server is empty. Push this device\'s state as the seed, or wait for another device.'
+    : 'Server has data from another device. Pick which side wins:';
   const ul = $('#initialSyncSummary');
   ul.innerHTML = '';
-  for (const [label, n] of [
-    ['workspaces', info.workspaces],
-    ['folders', info.folders],
-    ['essentials', info.essentials],
-    ['tabs', info.tabs],
-  ]) {
-    const li = document.createElement('li');
-    li.textContent = `${n} ${label}`;
-    ul.appendChild(li);
-  }
+  const serverLine = document.createElement('li');
+  serverLine.innerHTML = `<strong>Server:</strong> ${info.workspaces} workspaces · ${info.folders} folders · ${info.essentials} essentials · ${info.tabs} tabs`;
+  ul.appendChild(serverLine);
+  const localLine = document.createElement('li');
+  localLine.innerHTML = `<strong>This device:</strong> ${info.localWorkspaces} workspaces · ${info.localTabs} tabs`;
+  ul.appendChild(localLine);
+  // Hide "Replace local" button if server is empty (nothing to apply).
+  $('#confirmReplaceBtn').style.display = info.serverEmpty ? 'none' : '';
   sec.classList.remove('hidden');
 }
 

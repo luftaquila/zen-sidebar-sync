@@ -67,14 +67,14 @@
 
     <!-- Initial sync confirmation prompt -->
     <section id="initialSyncPrompt" class="section hidden initial-sync-prompt">
-      <h2>Initial sync — server already has data</h2>
+      <h2>Initial sync — pick a direction</h2>
       <p class="prompt-text">
-        Another device set up this server first. To join, your local tabs
-        and workspaces will be <strong>replaced</strong> with the server's:
+        <span id="initialSyncIntro">Pick which side wins:</span>
       </p>
       <ul id="initialSyncSummary" class="prompt-summary"></ul>
-      <div class="actions">
-        <button id="confirmReplaceBtn" class="btn primary">Replace local</button>
+      <div class="actions actions-stacked">
+        <button id="confirmReplaceBtn" class="btn danger">Replace local (use server)</button>
+        <button id="confirmPushBtn" class="btn danger">Push local (overwrite server)</button>
         <button id="cancelInitialBtn" class="btn secondary">Cancel</button>
       </div>
     </section>

@@ -100,27 +100,26 @@ async function onRemoteStateUpdate(remoteState, sourceDevice, isAuthState = fals
   const totalRemoteTabs = (remoteState.tabs || []).length;
 
   if (!initialSyncDone) {
-    if (totalRemoteTabs === 0) {
-      // Server empty — this device is the AUTHORITATIVE first one. Push
-      // local state outright (replace=true) so any other devices that
-      // connect later see this exact set as the seed.
-      if (syncClient.isConnected && tabMonitor.state) {
-        syncClient.sendFullState(tabMonitor.state, { replace: true });
-      }
+    const localTabCount = (tabMonitor.state?.tabs || []).length;
+    if (totalRemoteTabs === 0 && localTabCount === 0) {
+      // Both sides empty — nothing to negotiate, just mark done.
       initialSyncDone = true;
     } else {
-      // Server already has data from a prior device. Don't auto-merge —
-      // queue the state for user confirmation. The popup shows a
-      // destructive-replace prompt; until the user confirms, sync stays
-      // paused (initialSyncDone stays false → no patches flow). On
-      // confirm we apply the server state with addOnly=false (deletes
-      // local tabs/workspaces not in the server's snapshot).
+      // Either side has data. Show a prompt asking the user which side
+      // wins. Auto-seeding the server with local state used to race
+      // when two devices reconnected near-simultaneously; whichever
+      // device's WebSocket handshake completed first silently
+      // overwrote the other. Now every initial connect explicitly
+      // picks a direction.
       pendingInitialState = remoteState;
       pendingInitialInfo = {
         workspaces: (remoteState.workspaces || []).length,
         folders: (remoteState.folders || []).length,
-        tabs: (remoteState.tabs || []).length,
+        tabs: totalRemoteTabs,
         essentials: (remoteState.tabs || []).filter(t => t.kind === 'essential').length,
+        localTabs: localTabCount,
+        localWorkspaces: (tabMonitor.state?.workspaces || []).length,
+        serverEmpty: totalRemoteTabs === 0,
       };
       browser.runtime.sendMessage({
         type: 'status_update',
@@ -307,6 +306,19 @@ async function handleMessage(msg, sender) {
       // User confirmed: discard local, apply server state outright.
       if (!pendingInitialState) return { success: false, error: 'no pending state' };
       await tabApplier.applyState(pendingInitialState, { addOnly: false });
+      pendingInitialState = null;
+      pendingInitialInfo = null;
+      initialSyncDone = true;
+      browser.runtime.sendMessage({ type: 'status_update', status: syncStatus, lastSyncTime }).catch(() => {});
+      return { success: true };
+    }
+
+    case 'confirm_initial_push': {
+      // User chose: push this device's state as authoritative; server
+      // wipes its current state and accepts ours. Other connected peers
+      // will receive the replaced state via the broadcast.
+      if (!syncClient.isConnected || !tabMonitor.state) return { success: false, error: 'not connected' };
+      syncClient.sendFullState(tabMonitor.state, { replace: true });
       pendingInitialState = null;
       pendingInitialInfo = null;
       initialSyncDone = true;

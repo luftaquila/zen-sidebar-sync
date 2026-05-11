@@ -339,8 +339,20 @@ header {
   display: flex;
   gap: 8px;
 }
+.initial-sync-prompt .actions-stacked {
+  flex-direction: column;
+}
+.initial-sync-prompt .actions-stacked .btn {
+  width: 100%;
+}
 .initial-sync-prompt .btn {
   flex: 1;
+}
+.initial-sync-prompt .prompt-summary li strong {
+  color: #fbbf24;
+  font-weight: 600;
+  display: inline-block;
+  min-width: 88px;
 }
 .initial-sync-prompt .btn.primary {
   background: #ef4444;
