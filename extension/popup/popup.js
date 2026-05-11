@@ -213,8 +213,8 @@ async function adminDisableAll() {
 
 async function adminResetState() {
   const ok = await customConfirm(
-    'WIPE all server-side sync state? Cannot be undone. Connected devices will see the empty state on next push.',
-    { okText: 'Reset state', okClass: 'danger' },
+    'WIPE all server state AND disable sync on every connected device? Each device will need to be re-enabled manually.',
+    { okText: 'Reset everything', okClass: 'danger' },
   );
   if (!ok) return;
   const btn = $('#adminResetStateBtn');

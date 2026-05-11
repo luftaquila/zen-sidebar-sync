@@ -268,8 +268,13 @@ wss.on('connection', (ws) => {
         }
 
         case 'admin_reset_state': {
-          // Any authenticated client can wipe the server state to empty.
-          // Used in conjunction with admin_disable_all to start fresh.
+          // Wipe the server state AND force every connected device off.
+          // Without the force-disable, the admin client's normal capture
+          // loop would emit patches for its local tabs seconds later and
+          // re-populate the server, making the reset look like it did
+          // nothing. Forcing everyone off means the next person to
+          // re-enable sync re-seeds the server from scratch (and
+          // subsequent devices hit the initial-sync confirm prompt).
           state = {
             schemaVersion: SCHEMA_VERSION,
             workspaces: [],
@@ -279,10 +284,12 @@ wss.on('connection', (ws) => {
             lastModified: Date.now(),
           };
           scheduleSave();
-          console.log(`[${deviceId}] ADMIN reset state`);
+          console.log(`[${deviceId}] ADMIN reset state (force-disable all)`);
           ws.send(JSON.stringify({ type: 'admin_ok', action: 'reset_state' }));
-          // Broadcast the empty state so other clients see it immediately.
-          broadcast(ws, { type: 'state_update', state, sourceDevice: 'server' });
+          const data = JSON.stringify({ type: 'force_disable', reason: 'admin_reset' });
+          for (const [client] of clients) {
+            if (client.readyState === 1) client.send(data);
+          }
           break;
         }
 
