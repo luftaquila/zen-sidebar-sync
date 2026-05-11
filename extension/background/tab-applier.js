@@ -56,6 +56,7 @@ class TabApplier {
 
       const local = this.tabMonitor.state || {};
       const localTabsByUrl = new Map((local.tabs || []).map(t => [t.url, t]));
+      const localTabsByUuid = new Map((local.tabs || []).filter(t => t.syncUuid).map(t => [t.syncUuid, t]));
       const localFoldersBySyncId = new Map((local.folders || []).map(f => [f.syncId, f]));
       const localWsBySyncId = new Map((local.workspaces || []).map(w => [w.syncId, w]));
 
@@ -144,12 +145,18 @@ class TabApplier {
 
       for (const tab of (remoteState.tabs || [])) {
         if (!isAllowedUrl(tab.url)) continue;
-        const localTab = localTabsByUrl.get(tab.url);
-        if (!localTab && !liveUrls.has(tab.url)) {
+        // Match by syncUuid first (survives URL changes), then by URL, then
+        // by live-browser URL set (catches hidden-workspace tabs we lost
+        // track of). Only create when truly absent.
+        const byUuid = tab.syncUuid ? localTabsByUuid.get(tab.syncUuid) : null;
+        const byUrl = byUuid || localTabsByUrl.get(tab.url);
+        if (byUrl) {
+          await this._reconcileTab(tab, byUrl);
+        } else if (liveUrls.has(tab.url)) {
+          await this._reconcileTab(tab, null);
+        } else {
           await this._createAndPlaceTab(tab);
           liveUrls.add(tab.url);
-        } else {
-          await this._reconcileTab(tab, localTab);
         }
       }
 
@@ -404,35 +411,42 @@ class TabApplier {
 
       case 'add_tab': {
         if (!isAllowedUrl(op.tab?.url)) break;
-        const url = op.tab.url;
-        // Hard dedup: if the URL is already open locally (anywhere — visible
-        // or hidden workspace) OR is tracked as an in-flight create, do NOT
-        // create another. Devices echo each other's add_tab ops via the
-        // post-apply recapture; without this guard, every navigation across
-        // devices stacks up duplicate tabs.
-        const inState = (this.tabMonitor.state.tabs || []).some(t => t.url === url);
-        if (inState) {
-          const localTab = this.tabMonitor.state.tabs.find(t => t.url === url);
-          await this._reconcileTab(op.tab, localTab);
-          break;
+        const remote = op.tab;
+        // syncUuid is the cross-device tab identity. If we already have a
+        // local tab with this uuid (from a prior sync), reconcile instead.
+        if (remote.syncUuid) {
+          const local = (this.tabMonitor.state.tabs || []).find(t => t.syncUuid === remote.syncUuid);
+          if (local) {
+            await this._reconcileTab(remote, local);
+            break;
+          }
         }
-        const liveUrlsArr = await browser.zenInternals.listLiveUrls().catch(() => []);
-        if (Array.isArray(liveUrlsArr) && liveUrlsArr.includes(url)) {
-          await this._reconcileTab(op.tab, null);
-          break;
-        }
-        await this._createAndPlaceTab(op.tab);
+        await this._createAndPlaceTab(remote);
         break;
       }
       case 'update_tab': {
         const tab = op.tab;
-        if (!tab?.url) break;
+        if (!tab?.syncUuid) break;
+        // URL change is a property update (navigation), no longer a
+        // remove+add cycle. Navigate the existing tab directly.
+        if (op.changes && 'url' in op.changes && isAllowedUrl(op.changes.url)) {
+          const found = await browser.zenInternals.findTabIdBySyncUuid({ syncUuid: tab.syncUuid });
+          if (found?.success && found.tabId != null) {
+            await browser.tabs.update(found.tabId, { url: op.changes.url }).catch(() => {});
+          }
+        }
         await this._reconcileTab(tab, null);
         break;
       }
       case 'remove_tab': {
-        const url = op.url;
-        if (url) await browser.zenInternals.removeTab({ tabUrl: url });
+        // Prefer syncUuid (stable identity); fall back to URL for any
+        // legacy ops still in flight from an older sender.
+        const uuid = op.syncId?.startsWith('tab-') ? op.syncId.slice(4) : null;
+        if (uuid) {
+          await browser.zenInternals.removeTab({ syncUuid: uuid });
+        } else if (op.url) {
+          await browser.zenInternals.removeTab({ tabUrl: op.url });
+        }
         break;
       }
     }
@@ -471,6 +485,12 @@ class TabApplier {
       console.warn('[TabApplier] tabs.create failed:', remoteTab.url, err?.message);
       return null;
     }
+    // Bind the cross-device syncUuid to the just-created tab so subsequent
+    // ops (update_tab/remove_tab) from the source device can locate it
+    // here regardless of URL changes.
+    if (remoteTab.syncUuid) {
+      await browser.zenInternals.setTabSyncUuid({ tabId: tab.id, syncUuid: remoteTab.syncUuid }).catch(() => {});
+    }
     // Tell the monitor about the just-created tab so the next (silent)
     // recapture doesn't lose it just because currentURI is still
     // about:blank. Without this, capture skips the tab → tabMonitor.state
@@ -492,7 +512,9 @@ class TabApplier {
     const wsUuid = remoteTab.workspaceSyncId
       ? this.tabMonitor.workspaceUuidBySyncId.get(remoteTab.workspaceSyncId)
       : null;
-    const tabRef = { tabId, tabUrl: url }; // shared identifier passed to every zen call
+    // Identity precedence inside zen-internals: tabId (newly created) >
+    // syncUuid (stable cross-device) > tabUrl (legacy fallback).
+    const tabRef = { tabId, syncUuid: remoteTab.syncUuid, tabUrl: url };
 
     if (remoteTab.kind === 'essential') {
       await browser.zenInternals.setEssential({ ...tabRef, essential: true });

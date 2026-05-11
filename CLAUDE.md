@@ -108,8 +108,8 @@ cd extension/native && ./install.sh
 # Windows (PowerShell):
 cd extension\native; powershell -ExecutionPolicy Bypass -File install.ps1
 
-# reset server sync state (schema v2)
-podman exec zen-sync sh -c 'echo "{\"schemaVersion\":2,\"workspaces\":[],\"folders\":[],\"tabs\":[],\"version\":0,\"lastModified\":0}" > /data/sync-state.json'
+# reset server sync state (schema v3)
+podman exec zen-sync sh -c 'echo "{\"schemaVersion\":3,\"workspaces\":[],\"folders\":[],\"tabs\":[],\"version\":0,\"lastModified\":0}" > /data/sync-state.json'
 ```
 
 ## Conventions

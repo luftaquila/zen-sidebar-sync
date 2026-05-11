@@ -69,6 +69,35 @@
         "parameters": []
       },
       {
+        "name": "setTabSyncUuid",
+        "type": "function",
+        "async": true,
+        "parameters": [
+          {
+            "name": "options",
+            "type": "object",
+            "properties": {
+              "tabId": { "type": "integer" },
+              "syncUuid": { "type": "string" }
+            }
+          }
+        ]
+      },
+      {
+        "name": "findTabIdBySyncUuid",
+        "type": "function",
+        "async": true,
+        "parameters": [
+          {
+            "name": "options",
+            "type": "object",
+            "properties": {
+              "syncUuid": { "type": "string" }
+            }
+          }
+        ]
+      },
+      {
         "name": "moveTabToWorkspace",
         "type": "function",
         "async": true,
@@ -79,6 +108,7 @@
             "properties": {
               "tabId": { "type": "integer", "optional": true },
               "tabUrl": { "type": "string", "optional": true },
+              "syncUuid": { "type": "string", "optional": true },
               "workspaceUuid": { "type": "string" }
             }
           }
@@ -95,6 +125,7 @@
             "properties": {
               "tabId": { "type": "integer", "optional": true },
               "tabUrl": { "type": "string", "optional": true },
+              "syncUuid": { "type": "string", "optional": true },
               "essential": { "type": "boolean" }
             }
           }
@@ -111,6 +142,7 @@
             "properties": {
               "tabId": { "type": "integer", "optional": true },
               "tabUrl": { "type": "string", "optional": true },
+              "syncUuid": { "type": "string", "optional": true },
               "pinned": { "type": "boolean" }
             }
           }
@@ -235,6 +267,7 @@
             "properties": {
               "tabId": { "type": "integer", "optional": true },
               "tabUrl": { "type": "string", "optional": true },
+              "syncUuid": { "type": "string", "optional": true },
               "folderId": { "type": "string" }
             }
           }

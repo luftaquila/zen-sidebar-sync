@@ -9,7 +9,7 @@
  * `update_tab` op instead of a remove+add cycle.
  */
 
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 3;
 const NATIVE_HOST = 'zen_sidebar_sync';
 const NATIVE_CACHE_TTL = 5000;
 const UUID_NAME_RE = /^\{?[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\}?$/;
@@ -317,6 +317,17 @@ class TabMonitor {
       const favicon = faviconByUrl.get(t.url) || '';
       const wsAnchor = t.zenWorkspace ? wsBySrcUuid.get(t.zenWorkspace) : null;
 
+      // Schema v3: identity is per-tab sync UUID (persisted via SessionStore).
+      // URL is now a regular property — changes (navigation) produce
+      // update_tab ops instead of remove+add cycles, eliminating the
+      // "page navigation creates a new tab on the other device" bug.
+      // Tabs without a syncUuid (native host fallback, no chrome access)
+      // are skipped — better than emitting URL-based syncIds that won't
+      // round-trip with UUID-based ones from the other device.
+      if (!t.syncUuid) {
+        continue;
+      }
+
       let kind, workspaceSyncId;
       if (t.zenEssential) {
         kind = 'essential';
@@ -334,7 +345,8 @@ class TabMonitor {
         : null;
 
       tabs.push({
-        syncId: makeSyncId('tab', t.url),
+        syncId: `tab-${t.syncUuid}`,
+        syncUuid: t.syncUuid,
         url: t.url,
         title: t.title || '',
         icon: favicon,
@@ -401,50 +413,19 @@ class TabMonitor {
 
     const workspaces = Array.from(wsBySrcUuid.values());
 
-    // Per-URL dedup mirroring _buildFromNative; pick canonical entry.
-    const byUrl = new Map();
-    const score = (ess, pinned) => (ess ? 1000 : 0) + (pinned ? 1 : 0);
-    for (const tab of allTabs) {
-      if (!tab.url || (!tab.url.startsWith('http:') && !tab.url.startsWith('https:'))) continue;
-      const [ess, wsId] = await Promise.all([
-        browser.sessions.getTabValue(tab.id, 'zen-essential').catch(() => null),
-        browser.sessions.getTabValue(tab.id, 'zen-workspace-id').catch(() => null),
-      ]);
-      const existing = byUrl.get(tab.url);
-      if (!existing || score(!!ess, !!tab.pinned) > score(!!existing.ess, !!existing.tab.pinned)) {
-        byUrl.set(tab.url, { tab, ess, wsId });
-      }
-    }
-
-    let pos = 0;
-    for (const { tab, ess, wsId } of byUrl.values()) {
-      const wsAnchor = wsId ? wsBySrcUuid.get(wsId) : null;
-      const kind = ess ? 'essential' : (tab.pinned ? 'pinned' : 'normal');
-      // Non-essential tab needs a workspace anchor; without one we can't
-      // place it on receiving devices, so drop it from sync rather than
-      // emitting a tab with workspaceSyncId=null (which the applier would
-      // route to the active workspace, creating duplicates).
-      if (!ess && !wsAnchor) continue;
-
-      tabs.push({
-        syncId: makeSyncId('tab', tab.url),
-        url: tab.url,
-        title: tab.title || '',
-        icon: tab.favIconUrl || '',
-        kind,
-        workspaceSyncId: wsAnchor ? wsAnchor.syncId : null,
-        folderSyncId: null,
-        pinned: kind !== 'normal',
-        position: pos++,
-        lastModified: now,
-      });
-    }
+    // Schema v3 requires per-tab syncUuid from chrome-side SessionStore.
+    // The browser-API fallback can't read it (browser.sessions and
+    // SessionStore.getCustomTabValue are different storage), so we
+    // intentionally emit NO tabs here. Workspaces still flow through so
+    // the applier knows the layout, but the _fallback flag still blocks
+    // the apply path entirely — preventing the "every tab duplicates"
+    // failure mode that motivated this whole architecture change.
 
     return {
       schemaVersion: SCHEMA_VERSION,
       workspaces,
       folders: [],
-      tabs,
+      tabs: [],
       _fallback: true,
     };
   }

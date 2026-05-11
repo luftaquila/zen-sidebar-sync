@@ -28,6 +28,36 @@ function getWin() {
   return Services.wm.getMostRecentWindow("navigator:browser");
 }
 
+// SessionStore-backed per-tab UUID. Stable across navigations (URL changes
+// no longer break tab identity), persisted on disk via session store, and
+// survives browser restart. This is the cross-device identity for tabs.
+let _SS = null;
+function ss() {
+  if (!_SS) {
+    try {
+      _SS = ChromeUtils.importESModule("resource:///modules/sessionstore/SessionStore.sys.mjs").SessionStore;
+    } catch {
+      _SS = null;
+    }
+  }
+  return _SS;
+}
+
+function getTabSyncUuid(xulTab, { create = false } = {}) {
+  const SS = ss();
+  if (!SS) return null;
+  try {
+    let uuid = SS.getCustomTabValue(xulTab, "zen-sync-uuid");
+    if (!uuid && create) {
+      uuid = Services.uuid.generateUUID().toString().slice(1, -1); // strip braces
+      SS.setCustomTabValue(xulTab, "zen-sync-uuid", uuid);
+    }
+    return uuid || null;
+  } catch {
+    return null;
+  }
+}
+
 function findTabByUrl(win, url) {
   if (!url || !win?.gBrowser) return null;
   for (const tab of win.gBrowser.tabs) {
@@ -52,9 +82,25 @@ function findTabByExtId(context, tabId) {
   }
 }
 
-function resolveTab(context, win, tabId, tabUrl) {
+function findTabBySyncUuid(win, syncUuid) {
+  if (!syncUuid || !win?.gBrowser) return null;
+  for (const tab of win.gBrowser.tabs) {
+    try {
+      if (getTabSyncUuid(tab) === syncUuid) return tab;
+    } catch {}
+  }
+  return null;
+}
+
+function resolveTab(context, win, tabId, tabUrl, syncUuid) {
+  // Precedence: explicit tabId (from a just-created tab) > syncUuid
+  // (stable cross-device identity, survives URL changes) > tabUrl
+  // (legacy fallback, fails for newly-created tabs because currentURI
+  // hasn't transitioned away from about:blank).
   const byId = findTabByExtId(context, tabId);
   if (byId) return byId;
+  const byUuid = findTabBySyncUuid(win, syncUuid);
+  if (byUuid) return byUuid;
   return findTabByUrl(win, tabUrl);
 }
 
@@ -209,6 +255,9 @@ this.zenInternals = class extends ExtensionAPI {
               const url = tab.linkedBrowser?.currentURI?.spec;
               if (!url || (!url.startsWith('http:') && !url.startsWith('https:'))) continue;
               const groupId = tab.group?.id || null;
+              // Stable per-tab identity — generated and persisted on first
+              // capture, survives navigation and restart.
+              const syncUuid = getTabSyncUuid(tab, { create: true });
               out.tabs.push({
                 url,
                 title: tab.label || '',
@@ -217,12 +266,35 @@ this.zenInternals = class extends ExtensionAPI {
                 pinned: !!tab.pinned,
                 groupId,
                 position: pos++,
+                syncUuid,
               });
             }
           } catch (e) {
             console.warn('[zenInternals] tab enum failed:', e.message);
           }
           return out;
+        },
+
+        async setTabSyncUuid({ tabId, syncUuid }) {
+          return safe(async () => {
+            const tab = findTabByExtId(context, tabId);
+            if (!tab) return { success: false, error: `tab not found: ${tabId}` };
+            if (!syncUuid) return { success: false, error: "missing syncUuid" };
+            const SS = ss();
+            if (!SS) return { success: false, error: "SessionStore unavailable" };
+            SS.setCustomTabValue(tab, "zen-sync-uuid", syncUuid);
+            return { success: true };
+          });
+        },
+
+        async findTabIdBySyncUuid({ syncUuid }) {
+          return safe(async () => {
+            const win = getWin();
+            const tab = findTabBySyncUuid(win, syncUuid);
+            if (!tab) return { success: false, error: "not found" };
+            const id = context.extension?.tabManager?.getWrapper?.(tab)?.id;
+            return { success: true, tabId: id ?? null, url: tab.linkedBrowser?.currentURI?.spec || null };
+          });
         },
 
         // --- Tab placement ---
@@ -232,12 +304,12 @@ this.zenInternals = class extends ExtensionAPI {
         // browser.tabs.create — URL lookup would miss them entirely, causing
         // the tab to be left in the active workspace instead of being placed.
 
-        async moveTabToWorkspace({ tabId, tabUrl, workspaceUuid }) {
+        async moveTabToWorkspace({ tabId, tabUrl, syncUuid, workspaceUuid }) {
           return safe(async () => {
             const win = getWin();
             if (!win?.gZenWorkspaces) return { success: false, error: "gZenWorkspaces unavailable" };
-            const tab = resolveTab(context, win, tabId, tabUrl);
-            if (!tab) return { success: false, error: `tab not found: ${tabUrl || tabId}` };
+            const tab = resolveTab(context, win, tabId, tabUrl, syncUuid);
+            if (!tab) return { success: false, error: `tab not found: ${tabUrl || tabId || syncUuid}` };
             // Zen's moveTabsToWorkspace silently skips tabs with zen-essential
             // attribute. Caller is responsible for clearing essential first.
             win.gZenWorkspaces.moveTabToWorkspace(tab, workspaceUuid);
@@ -245,13 +317,13 @@ this.zenInternals = class extends ExtensionAPI {
           });
         },
 
-        async setEssential({ tabId, tabUrl, essential }) {
+        async setEssential({ tabId, tabUrl, syncUuid, essential }) {
           return safe(async () => {
             const win = getWin();
             const mgr = win?.gZenPinnedTabManager;
             if (!mgr) return { success: false, error: "gZenPinnedTabManager unavailable" };
-            const tab = resolveTab(context, win, tabId, tabUrl);
-            if (!tab) return { success: false, error: `tab not found: ${tabUrl || tabId}` };
+            const tab = resolveTab(context, win, tabId, tabUrl, syncUuid);
+            if (!tab) return { success: false, error: `tab not found: ${tabUrl || tabId || syncUuid}` };
             const isEssential = tab.hasAttribute("zen-essential");
             if (essential && !isEssential) {
               mgr.addToEssentials(tab);
@@ -262,12 +334,12 @@ this.zenInternals = class extends ExtensionAPI {
           });
         },
 
-        async setPinned({ tabId, tabUrl, pinned }) {
+        async setPinned({ tabId, tabUrl, syncUuid, pinned }) {
           return safe(async () => {
             const win = getWin();
             if (!win?.gBrowser) return { success: false, error: "gBrowser unavailable" };
-            const tab = resolveTab(context, win, tabId, tabUrl);
-            if (!tab) return { success: false, error: `tab not found: ${tabUrl || tabId}` };
+            const tab = resolveTab(context, win, tabId, tabUrl, syncUuid);
+            if (!tab) return { success: false, error: `tab not found: ${tabUrl || tabId || syncUuid}` };
             if (tab.hasAttribute("zen-essential")) {
               return { success: true, skipped: "essential tab" };
             }
@@ -277,11 +349,11 @@ this.zenInternals = class extends ExtensionAPI {
           });
         },
 
-        async removeTab({ tabId, tabUrl }) {
+        async removeTab({ tabId, tabUrl, syncUuid }) {
           return safe(async () => {
             const win = getWin();
             if (!win?.gBrowser) return { success: false, error: "gBrowser unavailable" };
-            const tab = resolveTab(context, win, tabId, tabUrl);
+            const tab = resolveTab(context, win, tabId, tabUrl, syncUuid);
             if (!tab) return { success: true, skipped: "not found" };
             win.gBrowser.removeTab(tab);
             return { success: true };
@@ -411,23 +483,23 @@ this.zenInternals = class extends ExtensionAPI {
           });
         },
 
-        async addTabToFolder({ tabId, tabUrl, folderId }) {
+        async addTabToFolder({ tabId, tabUrl, syncUuid, folderId }) {
           return safe(async () => {
             const win = getWin();
             const folder = findFolderById(win, folderId);
             if (!folder) return { success: false, error: `folder not found: ${folderId}` };
-            const tab = resolveTab(context, win, tabId, tabUrl);
-            if (!tab) return { success: false, error: `tab not found: ${tabUrl || tabId}` };
+            const tab = resolveTab(context, win, tabId, tabUrl, syncUuid);
+            if (!tab) return { success: false, error: `tab not found: ${tabUrl || tabId || syncUuid}` };
             if (!tab.pinned && win.gBrowser?.pinTab) win.gBrowser.pinTab(tab);
             folder.addTabs([tab]);
             return { success: true };
           });
         },
 
-        async removeTabFromFolder({ tabId, tabUrl }) {
+        async removeTabFromFolder({ tabId, tabUrl, syncUuid }) {
           return safe(async () => {
             const win = getWin();
-            const tab = resolveTab(context, win, tabId, tabUrl);
+            const tab = resolveTab(context, win, tabId, tabUrl, syncUuid);
             if (!tab) return { success: true, skipped: "not found" };
             if (tab.group && win.gBrowser?.ungroupTab) {
               win.gBrowser.ungroupTab(tab);

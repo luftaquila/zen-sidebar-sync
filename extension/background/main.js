@@ -9,7 +9,7 @@ import TabMonitor from './tab-monitor.js';
 import SyncClient from './sync-client.js';
 import TabApplier from './tab-applier.js';
 
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 3;
 
 let tabMonitor;
 let syncClient;

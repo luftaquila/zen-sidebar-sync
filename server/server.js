@@ -11,9 +11,9 @@ const PORT = parseInt(process.env.PORT || '9223');
 const STATE_FILE = join(DATA_DIR, 'sync-state.json');
 const TOKEN_FILE = join(DATA_DIR, 'tokens.json');
 
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 3;
 
-const TAB_PROPS = ['url', 'title', 'icon', 'kind', 'workspaceSyncId', 'folderSyncId', 'pinned', 'position', 'lastModified'];
+const TAB_PROPS = ['url', 'title', 'icon', 'kind', 'workspaceSyncId', 'folderSyncId', 'pinned', 'position', 'syncUuid', 'lastModified'];
 const FOLDER_PROPS = ['name', 'workspaceSyncId', 'parentSyncId', 'collapsed', 'userIcon', 'position', 'lastModified'];
 const WS_PROPS = ['name', 'icon', 'theme', 'position', 'lastModified'];
 
