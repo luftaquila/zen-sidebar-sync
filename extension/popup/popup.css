@@ -167,6 +167,14 @@ header {
   border: 1px solid #3a3a5a;
 }
 
+.btn.primary {
+  background: #6366f1;
+  color: white;
+}
+.btn.primary:hover {
+  background: #4f46e5;
+}
+
 .btn.danger {
   background: #6b1717;
   color: #fde0e0;
@@ -193,6 +201,42 @@ header {
 }
 .admin-section[open] summary {
   color: #f87171;
+}
+
+.confirm-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  padding: 16px;
+}
+.confirm-overlay.hidden { display: none; }
+.confirm-box {
+  background: #1a1a2e;
+  border: 1px solid #3a3a5a;
+  border-radius: 8px;
+  padding: 14px 16px;
+  width: 100%;
+  max-width: 280px;
+  box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+}
+.confirm-message {
+  font-size: 13px;
+  line-height: 1.45;
+  color: #e0e0e0;
+  margin-bottom: 12px;
+}
+.confirm-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+.confirm-actions .btn {
+  padding: 6px 14px;
+  flex: 0 0 auto;
 }
 
 .actions {

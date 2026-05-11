@@ -5,6 +5,18 @@
   <link rel="stylesheet" href="popup.css">
 </head>
 <body>
+  <!-- Custom confirm overlay (replaces browser confirm() so styling matches
+       the popup and doesn't get blocked by some hosts' modal policies). -->
+  <div id="confirmOverlay" class="confirm-overlay hidden" role="dialog" aria-modal="true">
+    <div class="confirm-box">
+      <p id="confirmMessage" class="confirm-message"></p>
+      <div class="confirm-actions">
+        <button id="confirmCancelBtn" class="btn secondary">Cancel</button>
+        <button id="confirmOkBtn" class="btn primary">OK</button>
+      </div>
+    </div>
+  </div>
+
   <div class="container">
     <header>
       <div class="logo">

@@ -58,8 +58,41 @@ async function init() {
   }
 }
 
+// Promise-based custom confirm. Resolves true on OK, false on Cancel / Esc /
+// backdrop click. Used in place of window.confirm() so the destructive
+// prompts match popup styling and aren't subject to browser modal quirks.
+function customConfirm(message, { okText = 'OK', okClass = 'primary' } = {}) {
+  return new Promise((resolve) => {
+    const overlay = $('#confirmOverlay');
+    const msg = $('#confirmMessage');
+    const okBtn = $('#confirmOkBtn');
+    const cancelBtn = $('#confirmCancelBtn');
+    msg.textContent = message;
+    okBtn.textContent = okText;
+    okBtn.className = `btn ${okClass}`;
+    overlay.classList.remove('hidden');
+    const finish = (v) => {
+      overlay.classList.add('hidden');
+      okBtn.removeEventListener('click', onOk);
+      cancelBtn.removeEventListener('click', onCancel);
+      overlay.removeEventListener('click', onBackdrop);
+      document.removeEventListener('keydown', onKey);
+      resolve(v);
+    };
+    const onOk = () => finish(true);
+    const onCancel = () => finish(false);
+    const onBackdrop = (e) => { if (e.target === overlay) finish(false); };
+    const onKey = (e) => { if (e.key === 'Escape') finish(false); else if (e.key === 'Enter') finish(true); };
+    okBtn.addEventListener('click', onOk);
+    cancelBtn.addEventListener('click', onCancel);
+    overlay.addEventListener('click', onBackdrop);
+    document.addEventListener('keydown', onKey);
+    okBtn.focus();
+  });
+}
+
 async function confirmInitialReplace() {
-  if (!confirm('This will REPLACE your local tabs and workspaces with the server\'s state. Continue?')) return;
+  if (!(await customConfirm('Replace local tabs and workspaces with the server\'s state?', { okText: 'Replace', okClass: 'danger' }))) return;
   const btn = $('#confirmReplaceBtn');
   btn.disabled = true; btn.textContent = 'Applying…';
   await browser.runtime.sendMessage({ type: 'confirm_initial_replace' });
@@ -166,7 +199,11 @@ async function forcePull() {
 }
 
 async function adminDisableAll() {
-  if (!confirm('Turn off sync on EVERY connected device? Each device will need to be re-enabled manually.')) return;
+  const ok = await customConfirm(
+    'Turn off sync on EVERY connected device? Each device will need to be re-enabled manually.',
+    { okText: 'Disable all', okClass: 'danger' },
+  );
+  if (!ok) return;
   const btn = $('#adminDisableAllBtn');
   btn.disabled = true; btn.textContent = 'Sending…';
   await browser.runtime.sendMessage({ type: 'admin_disable_all' });
@@ -175,7 +212,11 @@ async function adminDisableAll() {
 }
 
 async function adminResetState() {
-  if (!confirm('WIPE all server-side sync state? Cannot be undone. Connected devices will see the empty state on next push.')) return;
+  const ok = await customConfirm(
+    'WIPE all server-side sync state? Cannot be undone. Connected devices will see the empty state on next push.',
+    { okText: 'Reset state', okClass: 'danger' },
+  );
+  if (!ok) return;
   const btn = $('#adminResetStateBtn');
   btn.disabled = true; btn.textContent = 'Resetting…';
   await browser.runtime.sendMessage({ type: 'admin_reset_state' });
