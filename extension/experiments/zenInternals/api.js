@@ -612,6 +612,59 @@ this.zenInternals = class extends ExtensionAPI {
           try { Services.console.logStringMessage(`[ZenSyncExt] ${msg}`); } catch {}
           return { success: true };
         },
+
+        // Reorder workspaces to match the given UUID list. Mirrors
+        // ZenSpaceManager.reorderWorkspace(id, newPosition) in upstream Zen
+        // (src/zen/spaces/ZenSpaceManager.mjs ~line 1520); calling it for
+        // each entry walks the workspace cache and re-emits the sidebar
+        // render. Best-effort: missing UUIDs are skipped, exceptions are
+        // swallowed by `safe`.
+        async reorderWorkspaces({ orderedUuids }) {
+          return safe(async () => {
+            const win = getWin();
+            if (!win?.gZenWorkspaces || !Array.isArray(orderedUuids)) return { success: false, error: "bad args" };
+            if (typeof win.gZenWorkspaces.reorderWorkspace !== "function") {
+              return { success: false, error: "reorderWorkspace not in this Zen version" };
+            }
+            let moved = 0;
+            for (let i = 0; i < orderedUuids.length; i++) {
+              try {
+                await win.gZenWorkspaces.reorderWorkspace(orderedUuids[i], i);
+                moved++;
+              } catch {}
+            }
+            return { success: true, moved };
+          });
+        },
+
+        // Reorder sibling folders within their parent container. There is
+        // no upstream ZenFolders API for this; we walk the DOM. parentId
+        // is null for top-level folders (siblings in the workspace
+        // container); for nested folders, the parent's groupContainer is
+        // the insertion target. Pattern matches reorderTabsInPlace above.
+        async reorderFolders({ orderedFolderIds, parentId }) {
+          return safe(async () => {
+            const win = getWin();
+            if (!win?.document || !Array.isArray(orderedFolderIds)) return { success: false, error: "bad args" };
+            const reversed = orderedFolderIds.slice().reverse();
+            let anchor = null;
+            let touched = 0;
+            for (const id of reversed) {
+              const folder = win.document.getElementById(id);
+              if (!folder || folder.tagName?.toLowerCase() !== "zen-folder") continue;
+              const parent = parentId
+                ? findFolderById(win, parentId)?.groupContainer
+                : folder.parentNode;
+              if (!parent) continue;
+              try {
+                parent.insertBefore(folder, anchor || null);
+                anchor = folder;
+                touched++;
+              } catch {}
+            }
+            return { success: true, moved: touched };
+          });
+        },
       },
     };
   }

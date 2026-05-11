@@ -469,7 +469,26 @@ class TabMonitor {
       oldState.tabs, newState.tabs,
       TAB_PROPS,
       (t) => ops.push({ type: 'add_tab', tab: t }),
-      (syncId, changes, tab) => ops.push({ type: 'update_tab', syncId, changes, tab }),
+      (syncId, changes, tab) => {
+        // Coalesce: skip update_tab ops where the ONLY changed field is
+        // title or icon AND the title looks like a transient loading
+        // state (URL string, empty, or single domain word). These are
+        // the most common source of update_tab flood during page loads;
+        // the final stable title arrives within a few seconds and gets
+        // emitted then. lastModified is a bookkeeping field we don't
+        // count as a meaningful change.
+        const meaningful = Object.keys(changes).filter(k => k !== 'lastModified');
+        if (meaningful.length > 0 && meaningful.every(k => k === 'title' || k === 'icon')) {
+          const t = changes.title;
+          if (typeof t === 'string' && (
+            t.startsWith('http://') || t.startsWith('https://') ||
+            t.length < 3 || t === tab.url
+          )) {
+            return; // drop this update — let the next capture emit the final title
+          }
+        }
+        ops.push({ type: 'update_tab', syncId, changes, tab });
+      },
       (syncId, oldTab) => ops.push({ type: 'remove_tab', syncId, url: oldTab?.url }),
     );
 

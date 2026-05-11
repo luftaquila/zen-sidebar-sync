@@ -211,7 +211,7 @@ class TabApplier {
         }
       }
 
-      // 5. Reorder tabs to match remote order. Group by
+      // 5a. Reorder tabs to match remote order. Group by
       // (workspaceSyncId, kind, folderSyncId), sort each bucket by
       // remote position, and reorder via the experiment API (which uses
       // DOM insertBefore so workspace containers are respected).
@@ -231,7 +231,48 @@ class TabApplier {
           }
         }
       } catch (e) {
-        console.warn('[TabApplier] reorder failed:', e?.message);
+        console.warn('[TabApplier] tab reorder failed:', e?.message);
+      }
+
+      // 5b. Reorder workspaces to match remote order. gZenWorkspaces
+      // expects local UUIDs, so translate syncIds via workspaceUuidBySyncId.
+      try {
+        const orderedWsUuids = (remoteState.workspaces || [])
+          .slice()
+          .sort((a, b) => (a.position ?? 0) - (b.position ?? 0))
+          .map(w => this.tabMonitor.workspaceUuidBySyncId.get(w.syncId))
+          .filter(Boolean);
+        if (orderedWsUuids.length >= 2) {
+          await browser.zenInternals.reorderWorkspaces({ orderedUuids: orderedWsUuids });
+        }
+      } catch (e) {
+        console.warn('[TabApplier] workspace reorder failed:', e?.message);
+      }
+
+      // 5c. Reorder folders within each parent bucket
+      // (workspaceSyncId, parentSyncId). Uses local folder DOM ids.
+      try {
+        const fldBuckets = new Map();
+        for (const f of (remoteState.folders || [])) {
+          const k = `${f.workspaceSyncId || ''}|${f.parentSyncId || ''}`;
+          if (!fldBuckets.has(k)) fldBuckets.set(k, []);
+          fldBuckets.get(k).push(f);
+        }
+        for (const [k, bucket] of fldBuckets) {
+          bucket.sort((a, b) => (a.position ?? 0) - (b.position ?? 0));
+          const orderedIds = bucket
+            .map(f => this.tabMonitor.folderLocalIdBySyncId.get(f.syncId))
+            .filter(Boolean);
+          if (orderedIds.length >= 2) {
+            const parentSyncId = k.split('|')[1] || null;
+            const parentLocalId = parentSyncId
+              ? this.tabMonitor.folderLocalIdBySyncId.get(parentSyncId)
+              : null;
+            await browser.zenInternals.reorderFolders({ orderedFolderIds: orderedIds, parentId: parentLocalId });
+          }
+        }
+      } catch (e) {
+        console.warn('[TabApplier] folder reorder failed:', e?.message);
       }
 
       // 6. Removal pass.

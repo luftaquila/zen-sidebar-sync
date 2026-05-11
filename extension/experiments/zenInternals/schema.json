@@ -312,6 +312,35 @@
         "parameters": [
           { "name": "msg", "type": "string" }
         ]
+      },
+      {
+        "name": "reorderWorkspaces",
+        "type": "function",
+        "async": true,
+        "parameters": [
+          {
+            "name": "options",
+            "type": "object",
+            "properties": {
+              "orderedUuids": { "type": "array", "items": { "type": "string" } }
+            }
+          }
+        ]
+      },
+      {
+        "name": "reorderFolders",
+        "type": "function",
+        "async": true,
+        "parameters": [
+          {
+            "name": "options",
+            "type": "object",
+            "properties": {
+              "orderedFolderIds": { "type": "array", "items": { "type": "string" } },
+              "parentId": { "type": "string", "optional": true }
+            }
+          }
+        ]
       }
     ]
   }
