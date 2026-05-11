@@ -45,7 +45,8 @@ async function init() {
   }
 
   browser.runtime.onMessage.addListener(handleMessage);
-  console.log('[ZenSync] Initialized');
+  const ver = browser.runtime.getManifest()?.version ?? '?';
+  console.log(`[ZenSync] Initialized — extension v${ver}, schema v${SCHEMA_VERSION}`);
 }
 
 // --- Local State Change (from TabMonitor) ---

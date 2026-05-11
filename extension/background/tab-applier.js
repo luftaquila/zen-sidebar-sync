@@ -403,11 +403,16 @@ class TabApplier {
       const wsUuid = this.tabMonitor.workspaceUuidBySyncId.get(remoteTab.workspaceSyncId);
       if (!wsUuid) {
         console.warn(
-          '[TabApplier] Skipping tab — no local workspace UUID for',
-          remoteTab.workspaceSyncId, ':', remoteTab.url,
+          '[TabApplier] SKIP — no local workspace UUID for',
+          remoteTab.workspaceSyncId, '→', remoteTab.url,
         );
         return null;
       }
+      console.log(
+        '[TabApplier] PLACE',
+        remoteTab.workspaceSyncId, '→ uuid', wsUuid.slice(0, 8),
+        '/', remoteTab.kind, '/', remoteTab.url.slice(0, 60),
+      );
     }
     let tab;
     try {
