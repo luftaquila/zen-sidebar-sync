@@ -358,10 +358,20 @@ class TabMonitor {
         workspaceSyncId,
         folderSyncId,
         pinned: kind !== 'normal',
+        // Temporary global position — re-bucketed below.
         position: typeof t.position === 'number' ? t.position : tabPos++,
         lastModified: now,
       });
     }
+
+    // Bucket-local positions: numbered 0..N within each
+    // (workspaceSyncId, kind, folderSyncId) group, in the same relative
+    // order the runtime API delivered them. This keeps positions stable
+    // for tabs in one workspace when something happens in another (no
+    // echo storm), while still tracking user-driven reorders within a
+    // single group. Folders bucket by (workspaceSyncId, parentSyncId).
+    bucketLocalPositions(tabs, t => `${t.workspaceSyncId || ''}|${t.kind}|${t.folderSyncId || ''}`);
+    bucketLocalPositions(folders, f => `${f.workspaceSyncId || ''}|${f.parentSyncId || ''}`);
 
     return {
       schemaVersion: SCHEMA_VERSION,
@@ -469,25 +479,35 @@ class TabMonitor {
 
 // --- Helpers (pure) ---
 
-// `position` is intentionally omitted: positions are recomputed every
-// capture from DOM order, so the value flutters at the noise floor (any
-// tab being added/removed shifts every subsequent index). Without removing
-// it from the diff, every capture emits dozens of position-only update ops
-// for tabs/folders that didn't actually move — exactly the ~600ms echo
-// storm visible on the server. We don't apply position changes anyway
-// (no reorder API), so the data is purely informational.
+// position re-enabled now that captures emit bucket-local positions
+// (numbered 0..N within each workspace/kind/folder group). Adding a tab
+// in workspace A no longer shifts positions for tabs in workspace B,
+// so the diff no longer storms with cross-workspace noise.
 //
-// `theme` is also omitted from WS_PROPS: it's an object whose runtime-API
-// representation differs by reference (and sometimes by content — Zen's
-// shallow-clone of _workspaceCache strips gradient internals), making the
-// diff fire on every capture. Theme is propagated via add_workspace at
-// creation time and via explicit setWorkspaceTheme calls only.
-const WS_PROPS = ['name', 'icon'];
-const FOLDER_PROPS = ['name', 'workspaceSyncId', 'parentSyncId', 'collapsed', 'userIcon'];
-const TAB_PROPS = ['url', 'title', 'icon', 'kind', 'workspaceSyncId', 'folderSyncId', 'pinned'];
+// theme stays out of WS_PROPS: runtime API can hand back empty default
+// themes, and we never want those to overwrite a populated local theme
+// on receivers. Theme flows via add_workspace at creation only.
+const WS_PROPS = ['name', 'icon', 'position'];
+const FOLDER_PROPS = ['name', 'workspaceSyncId', 'parentSyncId', 'collapsed', 'userIcon', 'position'];
+const TAB_PROPS = ['url', 'title', 'icon', 'kind', 'workspaceSyncId', 'folderSyncId', 'pinned', 'position'];
 
 function emptyState() {
   return { schemaVersion: SCHEMA_VERSION, workspaces: [], folders: [], tabs: [] };
+}
+
+function bucketLocalPositions(items, keyFn) {
+  // Stable sort by existing position so the original relative order
+  // within a bucket survives the rewrite.
+  const buckets = new Map();
+  for (const item of items) {
+    const k = keyFn(item);
+    if (!buckets.has(k)) buckets.set(k, []);
+    buckets.get(k).push(item);
+  }
+  for (const bucket of buckets.values()) {
+    bucket.sort((a, b) => (a.position ?? 0) - (b.position ?? 0));
+    bucket.forEach((item, i) => { item.position = i; });
+  }
 }
 
 function makeSyncId(prefix, str) {

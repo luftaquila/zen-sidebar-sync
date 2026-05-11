@@ -329,6 +329,42 @@ this.zenInternals = class extends ExtensionAPI {
           });
         },
 
+        // Reorder a sequence of tabs to match the given UUID order. Tabs
+        // are repositioned WITHIN THEIR CURRENT CONTAINER (workspace tab
+        // strip) by walking the parent's children list and insertBefore'ing
+        // them in order. This avoids the cross-workspace pitfalls of
+        // gBrowser.moveTabTo (which operates on a global index that
+        // doesn't respect Zen's per-workspace tab containers).
+        async reorderTabsInPlace({ orderedSyncUuids }) {
+          return safe(async () => {
+            const win = getWin();
+            if (!win?.gBrowser || !Array.isArray(orderedSyncUuids)) return { success: false, error: "bad args" };
+
+            // Walk in reverse so each insertBefore lands the tab before
+            // the already-positioned tail of its bucket.
+            let touched = 0;
+            const reversed = orderedSyncUuids.slice().reverse();
+            // Track per-container insertion anchors (last-placed tab of that bucket).
+            const anchorByContainer = new Map();
+            for (const uuid of reversed) {
+              const tab = findTabBySyncUuid(win, uuid);
+              if (!tab) continue;
+              const container = tab.parentNode;
+              if (!container) continue;
+              const anchor = anchorByContainer.get(container);
+              try {
+                container.insertBefore(tab, anchor || null);
+                anchorByContainer.set(container, tab);
+                touched++;
+              } catch (e) {
+                console.warn('[zenInternals] reorder insertBefore failed:', uuid, e.message);
+              }
+            }
+            try { win.gBrowser.tabContainer._invalidateCachedTabs?.(); } catch {}
+            return { success: true, moved: touched };
+          });
+        },
+
         // --- Tab placement ---
         // All tab ops accept `tabId` (preferred — direct WebExtension tab id
         // mapping) or fall back to `tabUrl`. Newly-created tabs MUST use tabId

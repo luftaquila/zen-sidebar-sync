@@ -98,6 +98,20 @@
         ]
       },
       {
+        "name": "reorderTabsInPlace",
+        "type": "function",
+        "async": true,
+        "parameters": [
+          {
+            "name": "options",
+            "type": "object",
+            "properties": {
+              "orderedSyncUuids": { "type": "array", "items": { "type": "string" } }
+            }
+          }
+        ]
+      },
+      {
         "name": "moveTabToWorkspace",
         "type": "function",
         "async": true,

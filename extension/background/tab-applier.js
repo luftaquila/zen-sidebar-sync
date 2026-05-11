@@ -211,7 +211,30 @@ class TabApplier {
         }
       }
 
-      // 5. Removal pass.
+      // 5. Reorder tabs to match remote order. Group by
+      // (workspaceSyncId, kind, folderSyncId), sort each bucket by
+      // remote position, and reorder via the experiment API (which uses
+      // DOM insertBefore so workspace containers are respected).
+      try {
+        const buckets = new Map();
+        for (const t of (remoteState.tabs || [])) {
+          if (!t.syncUuid) continue;
+          const k = `${t.workspaceSyncId || ''}|${t.kind}|${t.folderSyncId || ''}`;
+          if (!buckets.has(k)) buckets.set(k, []);
+          buckets.get(k).push(t);
+        }
+        for (const bucket of buckets.values()) {
+          bucket.sort((a, b) => (a.position ?? 0) - (b.position ?? 0));
+          const ordered = bucket.map(t => t.syncUuid);
+          if (ordered.length >= 2) {
+            await browser.zenInternals.reorderTabsInPlace({ orderedSyncUuids: ordered });
+          }
+        }
+      } catch (e) {
+        console.warn('[TabApplier] reorder failed:', e?.message);
+      }
+
+      // 6. Removal pass.
       if (!addOnly) {
         const remoteUrls = new Set((remoteState.tabs || []).map(t => t.url));
         for (const t of (local.tabs || [])) {
