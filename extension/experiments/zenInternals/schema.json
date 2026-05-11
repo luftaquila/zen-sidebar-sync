@@ -171,7 +171,9 @@
             "name": "options",
             "type": "object",
             "properties": {
-              "tabUrl": { "type": "string" }
+              "tabId": { "type": "integer", "optional": true },
+              "tabUrl": { "type": "string", "optional": true },
+              "syncUuid": { "type": "string", "optional": true }
             }
           }
         ]
@@ -296,9 +298,19 @@
             "name": "options",
             "type": "object",
             "properties": {
-              "tabUrl": { "type": "string" }
+              "tabId": { "type": "integer", "optional": true },
+              "tabUrl": { "type": "string", "optional": true },
+              "syncUuid": { "type": "string", "optional": true }
             }
           }
+        ]
+      },
+      {
+        "name": "log",
+        "type": "function",
+        "async": true,
+        "parameters": [
+          { "name": "msg", "type": "string" }
         ]
       }
     ]

@@ -607,6 +607,11 @@ this.zenInternals = class extends ExtensionAPI {
             return { success: true };
           });
         },
+
+        async log(msg) {
+          try { Services.console.logStringMessage(`[ZenSyncExt] ${msg}`); } catch {}
+          return { success: true };
+        },
       },
     };
   }

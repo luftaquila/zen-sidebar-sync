@@ -184,16 +184,16 @@ class TabMonitor {
         }
       }
 
-      // Reject captures where the tab count collapses unexpectedly. This catches
-      // partial native reads (e.g. session store mid-write) that would otherwise
-      // diff into a flood of remove_tab ops and propagate as mass deletion.
-      // Post-apply recaptures use skipGuard since the drop may be intentional
-      // (we just received a state where many tabs were removed).
+      // Reject captures where the tab count COLLAPSES catastrophically (e.g.
+      // a transient runtime API failure that returns no tabs at all). Most
+      // legitimate mass-close operations should pass through. Threshold tuned
+      // very loose: only trigger when the user had >30 tabs AND we see >90%
+      // gone in one capture; below that, accept and let normal patching run.
       if (!skipGuard) {
         const oldCount = (this.state.tabs || []).length;
         const newCount = (newState.tabs || []).length;
-        if (oldCount > 5 && newCount < oldCount * 0.3) {
-          console.warn(`[TabMonitor] Capture rejected: tab count dropped ${oldCount} → ${newCount} (>70% loss)`);
+        if (oldCount > 30 && newCount < oldCount * 0.1) {
+          console.warn(`[TabMonitor] Capture rejected: tab count dropped ${oldCount} → ${newCount} (>90% loss)`);
           return;
         }
       }

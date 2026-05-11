@@ -236,11 +236,14 @@ wss.on('connection', (ws) => {
             ws.send(JSON.stringify({ type: 'error', message: 'Invalid patch structure' }));
             break;
           }
-          // Mass-removal guard: a corrupted capture should not nuke the world.
+          // Mass-removal guard: catches catastrophically corrupted captures
+          // (client bug returning no tabs at all). Tuned very loose so a real
+          // user mass-close operation passes through; client-side capture
+          // guard is the first line of defense.
           const removals = countRemovals(msg.patch, state);
           const current = countStateItems(state);
-          if (current > 5 && removals > current * 0.5) {
-            console.warn(`[${deviceId}] REJECTED patch: ${removals}/${current} removals (>50%)`);
+          if (current > 30 && removals > current * 0.9) {
+            console.warn(`[${deviceId}] REJECTED patch: ${removals}/${current} removals (>90%)`);
             for (const op of msg.patch.operations) console.warn(`  ${logPatchOp(op)}`);
             ws.send(JSON.stringify({ type: 'error', message: 'Patch rejected: too many removals' }));
             break;

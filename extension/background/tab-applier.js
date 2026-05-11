@@ -299,12 +299,66 @@ class TabApplier {
       }
       await this._ensureWorkspacesResolved(referencedWsSyncIds);
 
+      // Collect intended remote state for each tab touched by this patch
+      // so we can resolve final bucket placement after applying ops.
+      // For an `update_tab` op, the post-state bucket is determined by the
+      // INCOMING tab object (op.tab); for `add_tab` it's op.tab; for
+      // `remove_tab` we have nothing to add, but the OLD bucket may need
+      // reorder to close the gap (handled implicitly by capture).
+      const touchedBuckets = new Set();
+      const recordBucket = (t) => {
+        if (!t) return;
+        touchedBuckets.add(`${t.workspaceSyncId || ''}|${t.kind || ''}|${t.folderSyncId || ''}`);
+      };
+
       for (const op of ops) {
         try {
           await this._applyOp(op);
+          if (op.type === 'add_tab' || op.type === 'update_tab') recordBucket(op.tab);
         } catch (e) {
           console.warn('[TabApplier] op failed:', op.type, e?.message);
         }
+      }
+
+      // Reorder pass — after all ops applied, walk the patch's intended
+      // state and reorder each touched bucket to match remote positions.
+      // The intended state is reconstructed by combining ops with the
+      // post-capture state below — but since recapture happens in the
+      // finally block AFTER setApplying is decremented, do the reorder
+      // here using the patch's own tab objects.
+      try {
+        const tabsByBucket = new Map();
+        for (const op of ops) {
+          if (op.type !== 'add_tab' && op.type !== 'update_tab') continue;
+          const t = op.tab;
+          if (!t?.syncUuid) continue;
+          const k = `${t.workspaceSyncId || ''}|${t.kind || ''}|${t.folderSyncId || ''}`;
+          if (!touchedBuckets.has(k)) continue;
+          if (!tabsByBucket.has(k)) tabsByBucket.set(k, []);
+          tabsByBucket.get(k).push(t);
+        }
+        // Augment from current tabMonitor.state.tabs so the reorder list
+        // includes pre-existing tabs in each touched bucket — otherwise
+        // we'd only reorder the few tabs the patch directly mentions.
+        for (const t of (this.tabMonitor.state.tabs || [])) {
+          if (!t.syncUuid) continue;
+          const k = `${t.workspaceSyncId || ''}|${t.kind || ''}|${t.folderSyncId || ''}`;
+          if (!touchedBuckets.has(k)) continue;
+          if (!tabsByBucket.has(k)) tabsByBucket.set(k, []);
+          // Don't duplicate if the patch already added this syncUuid.
+          if (!tabsByBucket.get(k).some(x => x.syncUuid === t.syncUuid)) {
+            tabsByBucket.get(k).push(t);
+          }
+        }
+        for (const bucket of tabsByBucket.values()) {
+          bucket.sort((a, b) => (a.position ?? 0) - (b.position ?? 0));
+          const ordered = bucket.map(t => t.syncUuid);
+          if (ordered.length >= 2) {
+            await browser.zenInternals.reorderTabsInPlace({ orderedSyncUuids: ordered });
+          }
+        }
+      } catch (e) {
+        console.warn('[TabApplier] patch reorder failed:', e?.message);
       }
     } catch (err) {
       console.error('[TabApplier] applyPatch error:', err);
@@ -463,7 +517,9 @@ class TabApplier {
       }
       case 'remove_tab': {
         // Prefer syncUuid (stable identity); fall back to URL for any
-        // legacy ops still in flight from an older sender.
+        // legacy ops still in flight from an older sender. The schema
+        // was updated to accept tabId/tabUrl/syncUuid as optional —
+        // calling with `{syncUuid}` alone used to be silently rejected.
         const uuid = op.syncId?.startsWith('tab-') ? op.syncId.slice(4) : null;
         if (uuid) {
           await browser.zenInternals.removeTab({ syncUuid: uuid });
