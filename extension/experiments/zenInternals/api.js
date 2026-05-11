@@ -123,6 +123,10 @@ function findFolderById(win, folderId) {
   return null;
 }
 
+function isPopulatedTheme(t) {
+  return !!(t && typeof t === "object" && Array.isArray(t.gradientColors) && t.gradientColors.length > 0);
+}
+
 async function safe(fn) {
   try {
     const result = await fn();
@@ -149,9 +153,11 @@ this.zenInternals = class extends ExtensionAPI {
             );
             if (!ws?.uuid) return { success: false, error: "createAndSaveWorkspace returned no uuid" };
             // createAndSaveWorkspace always installs a fresh random theme;
-            // overwrite with the incoming theme so the workspace's gradient
-            // (color identity) matches the source device.
-            if (theme && typeof theme === "object") {
+            // overwrite ONLY when the incoming theme has actual content.
+            // An empty gradientColors array means the source's runtime cache
+            // returned defaults — don't propagate that emptiness here, the
+            // local fresh theme is more useful than a sterile replacement.
+            if (isPopulatedTheme(theme)) {
               try {
                 const updated = { ...ws, theme };
                 win.gZenWorkspaces.saveWorkspace(updated);
@@ -172,7 +178,11 @@ this.zenInternals = class extends ExtensionAPI {
             const updated = { ...ws };
             if (typeof name === "string") updated.name = name;
             if (typeof icon === "string") updated.icon = icon;
-            if (theme && typeof theme === "object") updated.theme = theme;
+            // Theme: only apply when the incoming gradient is non-empty.
+            // This prevents an empty default theme (from a misbehaving
+            // capture on the source device) from wiping out the existing
+            // populated local theme.
+            if (isPopulatedTheme(theme)) updated.theme = theme;
             win.gZenWorkspaces.saveWorkspace(updated);
             return { success: true };
           });
@@ -218,13 +228,35 @@ this.zenInternals = class extends ExtensionAPI {
           }
           const out = { workspaces: [], folders: [], tabs: [] };
           try {
-            const wsList = win.gZenWorkspaces.getWorkspaces() || [];
+            // getWorkspaces(true) goes through ZenSessionStore.getClonedSpaces()
+            // which returns the full persisted shape including the gradient
+            // theme; the default getWorkspaces() reads _workspaceCache which
+            // can hand back themes with empty gradientColors arrays (we saw
+            // this on the wire — every synced workspace ended up with the
+            // default empty theme on receivers).
+            let wsList = [];
+            try { wsList = win.gZenWorkspaces.getWorkspaces(true) || []; } catch {}
+            if (!wsList.length) {
+              try { wsList = win.gZenWorkspaces.getWorkspaces() || []; } catch {}
+            }
             for (const w of wsList) {
+              // Defensive: if a workspace from the cloned-spaces path still
+              // has an empty gradient (rare race), fall back to the cache
+              // entry's theme for that UUID. Either source is acceptable
+              // — we just don't want to overwrite a populated theme with
+              // an empty one on receiving devices.
+              let theme = w.theme || null;
+              if (theme && Array.isArray(theme.gradientColors) && theme.gradientColors.length === 0) {
+                try {
+                  const cached = (win.gZenWorkspaces.getWorkspaces() || []).find(c => c.uuid === w.uuid);
+                  if (cached?.theme?.gradientColors?.length) theme = cached.theme;
+                } catch {}
+              }
               out.workspaces.push({
                 uuid: w.uuid,
                 name: w.name || '',
                 icon: w.icon || '',
-                theme: w.theme || null,
+                theme,
                 containerTabId: w.containerTabId ?? 0,
               });
             }

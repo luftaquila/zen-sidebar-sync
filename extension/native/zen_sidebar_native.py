@@ -213,6 +213,10 @@ def extract_tab_data(profile):
                     'uuid': space.get('uuid', ''),
                     'name': space.get('name', ''),
                     'icon': space.get('icon', ''),
+                    # theme is Zen's gradient/color definition; passes through
+                    # verbatim so receiving devices recreate the same look.
+                    'theme': space.get('theme'),
+                    'containerTabId': space.get('containerTabId', 0),
                 })
             # Tab groups (Firefox groups + Zen extensions)
             for group in zs.get('groups', []):

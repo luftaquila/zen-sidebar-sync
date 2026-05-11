@@ -243,11 +243,15 @@ class TabMonitor {
         continue;
       }
       const syncId = makeSyncId('ws', name);
+      // Reject empty themes (defaults with no gradientColors) so we never
+      // overwrite a receiver's populated theme with sterile placeholder.
+      const theme = (w.theme && Array.isArray(w.theme.gradientColors) && w.theme.gradientColors.length > 0)
+        ? w.theme : null;
       const ws = {
         syncId,
         name,
         icon: w.icon || '',
-        theme: w.theme || null,
+        theme,
         position: wsPos++,
         lastModified: now,
       };
