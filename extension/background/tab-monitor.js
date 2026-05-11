@@ -54,17 +54,33 @@ class TabMonitor {
   }
 
   /** Called by tab-applier after browser.tabs.create succeeds. */
-  recordPendingTab(remoteTab) {
+  recordPendingTab(remoteTab, tabId = null) {
     if (!remoteTab?.url) return;
     this._pendingTabs.set(remoteTab.url, {
       tab: { ...remoteTab, lastModified: Date.now() },
+      tabId,
       expiresAt: Date.now() + 60000, // safety: drop after 60s even if URL never loads
     });
   }
 
   async init() {
     browser.tabs.onCreated.addListener((tab) => this._onTabEvent('created', tab));
-    browser.tabs.onRemoved.addListener((tabId) => this._onTabEvent('removed', { id: tabId }));
+    browser.tabs.onRemoved.addListener((tabId) => {
+      // If the user closes a tab the applier just recently created via
+      // browser.tabs.create, drop any matching pending entry so the
+      // silent recapture doesn't keep injecting it back into state for
+      // the next 60 seconds. Without this, fresh-from-sync tabs feel
+      // "unclosable" until the pending TTL expires.
+      try {
+        for (const [url, entry] of this._pendingTabs) {
+          if (entry.tabId === tabId) {
+            this._pendingTabs.delete(url);
+            break;
+          }
+        }
+      } catch {}
+      this._onTabEvent('removed', { id: tabId });
+    });
     browser.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
       if (changeInfo.url || changeInfo.title || changeInfo.pinned !== undefined || changeInfo.status === 'complete') {
         this._onTabEvent('updated', tab);

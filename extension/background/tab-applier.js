@@ -275,27 +275,57 @@ class TabApplier {
         console.warn('[TabApplier] folder reorder failed:', e?.message);
       }
 
-      // 6. Removal pass.
+      // 6. Removal pass — driven by the LIVE browser state, not the
+      // (possibly stale or incomplete) tabMonitor.state snapshot. A
+      // capture that missed some tabs would otherwise leave those tabs
+      // alive after a destructive replace, which is exactly the
+      // "old tabs still hanging around" symptom users hit.
       if (!addOnly) {
+        // Tabs: query gBrowser directly via experiment API.
+        let liveUrls = [];
+        try {
+          liveUrls = await browser.zenInternals.listLiveUrls();
+        } catch {
+          liveUrls = (local.tabs || []).map(t => t.url);
+        }
         const remoteUrls = new Set((remoteState.tabs || []).map(t => t.url));
-        for (const t of (local.tabs || [])) {
-          if (!remoteUrls.has(t.url)) {
-            await browser.zenInternals.removeTab({ tabUrl: t.url });
+        for (const url of liveUrls) {
+          if (!url) continue;
+          if (!remoteUrls.has(url)) {
+            await browser.zenInternals.removeTab({ tabUrl: url });
           }
         }
-        const remoteFolderIds = new Set((remoteState.folders || []).map(f => f.syncId));
-        for (const f of (local.folders || [])) {
-          if (!remoteFolderIds.has(f.syncId)) {
-            const folderId = this.tabMonitor.folderLocalIdBySyncId.get(f.syncId);
-            if (folderId) await browser.zenInternals.deleteFolder({ folderId });
-          }
+
+        // Folders: pull a fresh native/runtime snapshot so we see every
+        // current zen-folder, not just those tabMonitor caught.
+        let liveFolderIds = [];
+        try {
+          const fresh = await browser.zenInternals.getRuntimeState();
+          liveFolderIds = (fresh?.folders || []).map(f => f.id).filter(Boolean);
+        } catch {}
+        const remoteFolderSyncIds = new Set((remoteState.folders || []).map(f => f.syncId));
+        // Map local folder id → syncId via the monitor's reverse map.
+        // Any local folder whose syncId isn't in the remote set is dropped.
+        for (const fid of liveFolderIds) {
+          const syncId = this.tabMonitor.folderSyncIdByLocalId.get(fid);
+          if (syncId && remoteFolderSyncIds.has(syncId)) continue;
+          // Either not in remote, or we don't have a syncId mapping (orphan).
+          await browser.zenInternals.deleteFolder({ folderId: fid }).catch(() => {});
         }
+
+        // Workspaces: same idea but querying gZenWorkspaces directly.
         const remoteWsIds = new Set((remoteState.workspaces || []).map(w => w.syncId));
-        for (const w of (local.workspaces || [])) {
-          if (!remoteWsIds.has(w.syncId)) {
-            const uuid = this.tabMonitor.workspaceUuidBySyncId.get(w.syncId);
-            if (uuid) await browser.zenInternals.deleteWorkspace({ uuid });
-          }
+        let liveWs = [];
+        try {
+          const fresh = await browser.zenInternals.getRuntimeState();
+          liveWs = (fresh?.workspaces || []);
+        } catch {}
+        for (const w of liveWs) {
+          const name = (w.name || '').trim();
+          if (!name) continue;
+          const syncId = makeSyncId('ws', name);
+          if (remoteWsIds.has(syncId)) continue;
+          await browser.zenInternals.deleteWorkspace({ uuid: w.uuid }).catch(() => {});
         }
       }
     } catch (err) {
@@ -616,7 +646,7 @@ class TabApplier {
     // about:blank. Without this, capture skips the tab → tabMonitor.state
     // omits it → the very next normal capture diffs against the gap and
     // emits a duplicate add_tab back to the server.
-    this.tabMonitor.recordPendingTab(remoteTab);
+    this.tabMonitor.recordPendingTab(remoteTab, tab.id);
     // CRITICAL: pass tab.id through to _reconcileTab. The brand-new tab's
     // linkedBrowser.currentURI is still about:blank for a moment, so the
     // experiment API's URL-based lookup would miss it — moveTabToWorkspace,
