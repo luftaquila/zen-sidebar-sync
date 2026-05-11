@@ -178,17 +178,20 @@ this.zenInternals = class extends ExtensionAPI {
           return safe(async () => {
             const win = getWin();
             if (!win?.gZenWorkspaces) return { success: false, error: "gZenWorkspaces unavailable" };
+            // createAndSaveWorkspace with dontChange=true persists the
+            // workspace into _workspaceCache and propagates it to all
+            // windows but Zen's ZenSessionStore.getClonedSpaces() — what
+            // getWorkspaces(true) reads — does not include freshly-created
+            // workspaces until the next session-store flush (timing-dependent).
+            // We still call this because it's the only API that exists; the
+            // capture path (getRuntimeState) reads from _workspaceCache as
+            // a fallback so receiver-side dedup catches it.
             const ws = await win.gZenWorkspaces.createAndSaveWorkspace(
               name || "Space",
               icon || undefined,
               /* dontChange */ true,
             );
             if (!ws?.uuid) return { success: false, error: "createAndSaveWorkspace returned no uuid" };
-            // createAndSaveWorkspace always installs a fresh random theme;
-            // overwrite ONLY when the incoming theme has actual content.
-            // An empty gradientColors array means the source's runtime cache
-            // returned defaults — don't propagate that emptiness here, the
-            // local fresh theme is more useful than a sterile replacement.
             if (isPopulatedTheme(theme)) {
               try {
                 const updated = { ...ws, theme };

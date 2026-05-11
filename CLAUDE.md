@@ -95,6 +95,7 @@ The patch op set: `add/remove/update` × `workspace/folder/tab`. Every transitio
 - **Hidden workspace tab removal via browser API**: Removal pass uses experiment API `removeTab({tabUrl})` which iterates `gBrowser.tabs` (all workspaces). Folder deletion likewise uses `gZenFolders` DOM. Both work cross-workspace.
 - **Fallback mode (no native host)**: Only active workspace tabs are visible; folders are not captured (empty `folders` array sent to server). Re-installing the native host restores full visibility.
 - **Workspace rename = remove+add cycle**: changing a workspace name regenerates its syncId and all dependent folder syncIds. Server-side cascade drops the old workspace's data; the new name's records replace it. Keep renames rare.
+- **Workspace creation on receiving device may not be visible immediately**: Zen's `createAndSaveWorkspace` puts the new workspace into `_workspaceCache` and propagates, but `ZenSessionStore.getClonedSpaces()` — which `getWorkspaces(true)` reads — does not include freshly-created workspaces until Zen flushes session store (timing not exposed). The capture path's runtime API now reads from `_workspaceCache` as a fallback so the receiver still emits the workspace in its next state push. **Recommended workflow**: create matching-named workspaces on each device manually; once the names match, all tab/folder data syncs against them via name-derived `syncId`.
 
 ## Commands
 
