@@ -13,7 +13,8 @@
             "type": "object",
             "properties": {
               "name": { "type": "string" },
-              "icon": { "type": "string", "optional": true }
+              "icon": { "type": "string", "optional": true },
+              "theme": { "type": "any", "optional": true }
             }
           }
         ]
@@ -29,7 +30,8 @@
             "properties": {
               "uuid": { "type": "string" },
               "name": { "type": "string", "optional": true },
-              "icon": { "type": "string", "optional": true }
+              "icon": { "type": "string", "optional": true },
+              "theme": { "type": "any", "optional": true }
             }
           }
         ]
@@ -56,6 +58,12 @@
       },
       {
         "name": "listLiveUrls",
+        "type": "function",
+        "async": true,
+        "parameters": []
+      },
+      {
+        "name": "getRuntimeState",
         "type": "function",
         "async": true,
         "parameters": []

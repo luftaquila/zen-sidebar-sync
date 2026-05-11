@@ -72,7 +72,31 @@ class TabMonitor {
     this._nativeLastFetch = 0;
   }
 
-  // --- Native Messaging ---
+  // --- Runtime / Native data source ---
+
+  // Preferred: read state straight from Zen's chrome runtime via the
+  // experiment API. Zero flush latency, so local changes show up in capture
+  // immediately. Native messaging is used only as a fallback when the
+  // experiment API isn't loaded (legacy/dev installs).
+
+  async _getRuntimeState() {
+    try {
+      const data = await browser.zenInternals.getRuntimeState();
+      if (data && Array.isArray(data.tabs)) {
+        if (this._runtimeAvailable === undefined) {
+          console.log('[TabMonitor] Runtime state via experiment API');
+        }
+        this._runtimeAvailable = true;
+        return data;
+      }
+    } catch (e) {
+      if (this._runtimeAvailable === undefined) {
+        console.warn('[TabMonitor] Runtime API unavailable:', e?.message);
+      }
+      this._runtimeAvailable = false;
+    }
+    return null;
+  }
 
   async _getNativeData() {
     if (this._nativeAvailable === false) return null;
@@ -110,10 +134,14 @@ class TabMonitor {
 
   async captureFullState({ silent = false, skipGuard = false } = {}) {
     try {
-      const nativeData = await this._getNativeData();
+      // Preferred path: runtime state via experiment API — no flush lag.
+      // Fall back to native host (lagged but works without chrome API),
+      // then to browser API (active workspace only, fallback marker).
+      let source = await this._getRuntimeState();
+      if (!source) source = await this._getNativeData();
 
-      const newState = (nativeData && Array.isArray(nativeData.tabs))
-        ? await this._buildFromNative(nativeData)
+      const newState = (source && Array.isArray(source.tabs))
+        ? await this._buildFromNative(source)
         : await this._buildFromBrowserApi();
 
       // Reject captures where the tab count collapses unexpectedly. This catches
@@ -164,6 +192,8 @@ class TabMonitor {
     }
 
     // 1. Workspaces — drop UUID-shaped names (corruption from old sync).
+    // `theme` (Zen's gradient/color identity) flows through so receiving
+    // devices recreate the workspace with matching visual identity.
     const wsBySrcUuid = new Map();
     let wsPos = 0;
     for (const w of (nativeData.workspaces || [])) {
@@ -177,6 +207,7 @@ class TabMonitor {
         syncId,
         name,
         icon: w.icon || '',
+        theme: w.theme || null,
         position: wsPos++,
         lastModified: now,
       };
@@ -413,7 +444,7 @@ class TabMonitor {
 
 // --- Helpers (pure) ---
 
-const WS_PROPS = ['name', 'icon', 'position'];
+const WS_PROPS = ['name', 'icon', 'theme', 'position'];
 const FOLDER_PROPS = ['name', 'workspaceSyncId', 'parentSyncId', 'collapsed', 'userIcon', 'position'];
 const TAB_PROPS = ['url', 'title', 'icon', 'kind', 'workspaceSyncId', 'folderSyncId', 'pinned', 'position'];
 
@@ -437,6 +468,17 @@ function diffById(oldList, newList, propsToCompare, onAdd, onUpdate, onRemove) {
   const oldMap = new Map((oldList || []).map(x => [x.syncId, x]));
   const newIds = new Set((newList || []).map(x => x.syncId));
 
+  // Object-valued props (theme is a gradient definition object) need deep
+  // comparison; reference equality would emit a spurious update on every
+  // capture since each capture allocates a fresh object.
+  const eq = (a, b) => {
+    if (a === b) return true;
+    if (a == null || b == null) return false;
+    if (typeof a !== 'object' || typeof b !== 'object') return false;
+    try { return JSON.stringify(a) === JSON.stringify(b); }
+    catch { return false; }
+  };
+
   for (const item of (newList || [])) {
     const old = oldMap.get(item.syncId);
     if (!old) {
@@ -445,7 +487,7 @@ function diffById(oldList, newList, propsToCompare, onAdd, onUpdate, onRemove) {
       const changes = {};
       let changed = false;
       for (const k of propsToCompare) {
-        if (old[k] !== item[k]) {
+        if (!eq(old[k], item[k])) {
           changes[k] = item[k];
           changed = true;
         }

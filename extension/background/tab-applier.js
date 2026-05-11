@@ -91,11 +91,12 @@ class TabApplier {
       for (const ws of (remoteState.workspaces || [])) {
         // (a) syncId match
         if (this.tabMonitor.workspaceUuidBySyncId.has(ws.syncId)) {
-          // Rename if metadata drifted (still using existing UUID).
+          // Rename / re-theme if metadata drifted (still using existing UUID).
           const localWs = localWsBySyncId.get(ws.syncId);
-          if (localWs && (localWs.name !== ws.name || localWs.icon !== ws.icon)) {
+          const themeChanged = JSON.stringify(localWs?.theme || null) !== JSON.stringify(ws.theme || null);
+          if (localWs && (localWs.name !== ws.name || localWs.icon !== ws.icon || themeChanged)) {
             const uuid = this.tabMonitor.workspaceUuidBySyncId.get(ws.syncId);
-            if (uuid) await browser.zenInternals.renameWorkspace({ uuid, name: ws.name, icon: ws.icon });
+            if (uuid) await browser.zenInternals.renameWorkspace({ uuid, name: ws.name, icon: ws.icon, theme: ws.theme });
           }
           continue;
         }
@@ -103,10 +104,15 @@ class TabApplier {
         const byName = this.tabMonitor.workspaceUuidByName.get(ws.name);
         if (byName) {
           this.tabMonitor.workspaceUuidBySyncId.set(ws.syncId, byName);
+          // Push theme to the existing local workspace too, so colors match
+          // even when this device pre-existed the remote one by name.
+          if (ws.theme) {
+            await browser.zenInternals.renameWorkspace({ uuid: byName, name: ws.name, icon: ws.icon, theme: ws.theme }).catch(() => {});
+          }
           continue;
         }
         // (c) create, with native re-query fallback
-        const r = await browser.zenInternals.createWorkspace({ name: ws.name, icon: ws.icon })
+        const r = await browser.zenInternals.createWorkspace({ name: ws.name, icon: ws.icon, theme: ws.theme })
           .catch(err => ({ success: false, error: err?.message }));
         let uuid = (r?.success && r.uuid) ? r.uuid : null;
         if (!uuid) {
@@ -330,7 +336,7 @@ class TabApplier {
       case 'add_workspace': {
         const ws = op.workspace;
         if (!ws?.name) break;
-        const r = await browser.zenInternals.createWorkspace({ name: ws.name, icon: ws.icon });
+        const r = await browser.zenInternals.createWorkspace({ name: ws.name, icon: ws.icon, theme: ws.theme });
         if (r?.success && r.uuid) {
           wsMap.set(ws.syncId, r.uuid);
           wsByName.set(ws.name, r.uuid);
@@ -340,7 +346,12 @@ class TabApplier {
       case 'update_workspace': {
         const uuid = wsMap.get(op.syncId);
         if (uuid && op.changes) {
-          await browser.zenInternals.renameWorkspace({ uuid, name: op.changes.name, icon: op.changes.icon });
+          await browser.zenInternals.renameWorkspace({
+            uuid,
+            name: op.changes.name,
+            icon: op.changes.icon,
+            theme: op.changes.theme,
+          });
         }
         break;
       }

@@ -15,7 +15,7 @@ const SCHEMA_VERSION = 2;
 
 const TAB_PROPS = ['url', 'title', 'icon', 'kind', 'workspaceSyncId', 'folderSyncId', 'pinned', 'position', 'lastModified'];
 const FOLDER_PROPS = ['name', 'workspaceSyncId', 'parentSyncId', 'collapsed', 'userIcon', 'position', 'lastModified'];
-const WS_PROPS = ['name', 'icon', 'position', 'lastModified'];
+const WS_PROPS = ['name', 'icon', 'theme', 'position', 'lastModified'];
 
 function pick(obj, keys) {
   const out = {};

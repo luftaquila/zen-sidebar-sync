@@ -92,7 +92,7 @@ this.zenInternals = class extends ExtensionAPI {
       zenInternals: {
         // --- Workspace CRUD ---
 
-        async createWorkspace({ name, icon }) {
+        async createWorkspace({ name, icon, theme }) {
           return safe(async () => {
             const win = getWin();
             if (!win?.gZenWorkspaces) return { success: false, error: "gZenWorkspaces unavailable" };
@@ -102,11 +102,22 @@ this.zenInternals = class extends ExtensionAPI {
               /* dontChange */ true,
             );
             if (!ws?.uuid) return { success: false, error: "createAndSaveWorkspace returned no uuid" };
+            // createAndSaveWorkspace always installs a fresh random theme;
+            // overwrite with the incoming theme so the workspace's gradient
+            // (color identity) matches the source device.
+            if (theme && typeof theme === "object") {
+              try {
+                const updated = { ...ws, theme };
+                win.gZenWorkspaces.saveWorkspace(updated);
+              } catch (e) {
+                console.warn('[zenInternals] saveWorkspace theme failed:', e.message);
+              }
+            }
             return { success: true, uuid: ws.uuid, name: ws.name, icon: ws.icon };
           });
         },
 
-        async renameWorkspace({ uuid, name, icon }) {
+        async renameWorkspace({ uuid, name, icon, theme }) {
           return safe(async () => {
             const win = getWin();
             if (!win?.gZenWorkspaces) return { success: false, error: "gZenWorkspaces unavailable" };
@@ -115,6 +126,7 @@ this.zenInternals = class extends ExtensionAPI {
             const updated = { ...ws };
             if (typeof name === "string") updated.name = name;
             if (typeof icon === "string") updated.icon = icon;
+            if (theme && typeof theme === "object") updated.theme = theme;
             win.gZenWorkspaces.saveWorkspace(updated);
             return { success: true };
           });
@@ -148,6 +160,69 @@ this.zenInternals = class extends ExtensionAPI {
         async listLiveUrls() {
           const win = getWin();
           return Array.from(listLiveUrls(win));
+        },
+
+        // Real-time state dump straight from Zen's runtime — bypasses the
+        // session-store flush delay (15-30s) that breaks reverse-direction
+        // sync and essential counting. Matches the shape native host returns.
+        async getRuntimeState() {
+          const win = getWin();
+          if (!win?.gBrowser || !win?.gZenWorkspaces) {
+            return { workspaces: [], folders: [], tabs: [] };
+          }
+          const out = { workspaces: [], folders: [], tabs: [] };
+          try {
+            const wsList = win.gZenWorkspaces.getWorkspaces() || [];
+            for (const w of wsList) {
+              out.workspaces.push({
+                uuid: w.uuid,
+                name: w.name || '',
+                icon: w.icon || '',
+                theme: w.theme || null,
+                containerTabId: w.containerTabId ?? 0,
+              });
+            }
+          } catch (e) {
+            console.warn('[zenInternals] getWorkspaces failed:', e.message);
+          }
+          try {
+            const folders = win.document.querySelectorAll('zen-folder');
+            for (const f of folders) {
+              const parent = f.parentElement?.closest('zen-folder');
+              const userIconImg = f.icon?.querySelector('svg .icon image');
+              out.folders.push({
+                id: f.id,
+                name: f.label || '',
+                collapsed: !!f.collapsed,
+                parentId: parent ? parent.id : null,
+                workspaceId: f.getAttribute('zen-workspace-id') || '',
+                userIcon: userIconImg?.getAttribute('href') || '',
+                isLiveFolder: !!f.isLiveFolder,
+              });
+            }
+          } catch (e) {
+            console.warn('[zenInternals] folder enum failed:', e.message);
+          }
+          try {
+            let pos = 0;
+            for (const tab of win.gBrowser.tabs) {
+              const url = tab.linkedBrowser?.currentURI?.spec;
+              if (!url || (!url.startsWith('http:') && !url.startsWith('https:'))) continue;
+              const groupId = tab.group?.id || null;
+              out.tabs.push({
+                url,
+                title: tab.label || '',
+                zenWorkspace: tab.getAttribute('zen-workspace-id') || null,
+                zenEssential: tab.getAttribute('zen-essential') === 'true',
+                pinned: !!tab.pinned,
+                groupId,
+                position: pos++,
+              });
+            }
+          } catch (e) {
+            console.warn('[zenInternals] tab enum failed:', e.message);
+          }
+          return out;
         },
 
         // --- Tab placement ---
