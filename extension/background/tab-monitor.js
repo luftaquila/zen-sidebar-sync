@@ -20,6 +20,12 @@ class TabMonitor {
     this.state = emptyState();
     this.debounceTimer = null;
     this.DEBOUNCE_MS = 300;
+    // Workspace/folder events (create, rename, delete, reorder) don't
+    // surface through browser.tabs.* listeners. A periodic recapture
+    // catches them; 5 seconds is short enough that the user sees
+    // changes propagate without thinking about it, long enough that
+    // it's not a perf problem.
+    this.PERIODIC_CAPTURE_MS = 5000;
     this._applyingCount = 0;
 
     /** @type {Map<string,string>} workspace name -> local Zen UUID */
@@ -67,6 +73,17 @@ class TabMonitor {
     browser.tabs.onMoved.addListener((tabId) => this._onTabEvent('moved', { id: tabId }));
     browser.tabs.onAttached.addListener((tabId) => this._onTabEvent('attached', { id: tabId }));
     browser.tabs.onDetached.addListener((tabId) => this._onTabEvent('detached', { id: tabId }));
+
+    // Periodic catch-up capture: tab events miss workspace and folder
+    // operations (create, rename, delete, reorder) entirely. Every N
+    // seconds we recapture so changes propagate even when the user is
+    // only working in the sidebar. Cheap: runtime API reads gBrowser
+    // and gZenWorkspaces in-memory.
+    setInterval(() => {
+      if (this._applyingCount === 0) {
+        this.captureFullState({ silent: false }).catch(() => {});
+      }
+    }, this.PERIODIC_CAPTURE_MS);
 
     await this.captureFullState();
     return this.state;
