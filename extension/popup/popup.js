@@ -25,8 +25,17 @@ async function init() {
   const status = await browser.runtime.sendMessage({ type: 'get_status' });
   updateUI(status);
 
+  // If the background had a pending initial-sync prompt at popup-open time.
+  if (status?.pendingInitialInfo) {
+    renderInitialSyncPrompt(status.pendingInitialInfo);
+  }
+
   browser.runtime.onMessage.addListener((msg) => {
     if (msg.type === 'status_update') {
+      if (msg.status === 'awaiting_initial_confirm' && msg.initialSyncInfo) {
+        renderInitialSyncPrompt(msg.initialSyncInfo);
+        return;
+      }
       updateStatus(msg.status, msg);
       if (msg.lastSyncTime) {
         lastSyncTimestamp = msg.lastSyncTime;
@@ -39,10 +48,45 @@ async function init() {
   syncToggle.addEventListener('change', onToggleChange);
   $('#forcePushBtn').addEventListener('click', forcePush);
   $('#forcePullBtn').addEventListener('click', forcePull);
+  $('#confirmReplaceBtn').addEventListener('click', confirmInitialReplace);
+  $('#cancelInitialBtn').addEventListener('click', cancelInitialSync);
 
   for (const id of ['serverUrl', 'syncToken', 'deviceName']) {
     $(`#${id}`).addEventListener('change', onConfigChange);
   }
+}
+
+async function confirmInitialReplace() {
+  if (!confirm('This will REPLACE your local tabs and workspaces with the server\'s state. Continue?')) return;
+  const btn = $('#confirmReplaceBtn');
+  btn.disabled = true; btn.textContent = 'Applying…';
+  await browser.runtime.sendMessage({ type: 'confirm_initial_replace' });
+  $('#initialSyncPrompt').classList.add('hidden');
+  btn.disabled = false; btn.textContent = 'Replace local';
+}
+
+async function cancelInitialSync() {
+  await browser.runtime.sendMessage({ type: 'cancel_initial_sync' });
+  $('#initialSyncPrompt').classList.add('hidden');
+  syncToggle.checked = false;
+}
+
+function renderInitialSyncPrompt(info) {
+  const sec = $('#initialSyncPrompt');
+  if (!info) { sec.classList.add('hidden'); return; }
+  const ul = $('#initialSyncSummary');
+  ul.innerHTML = '';
+  for (const [label, n] of [
+    ['workspaces', info.workspaces],
+    ['folders', info.folders],
+    ['essentials', info.essentials],
+    ['tabs', info.tabs],
+  ]) {
+    const li = document.createElement('li');
+    li.textContent = `${n} ${label}`;
+    ul.appendChild(li);
+  }
+  sec.classList.remove('hidden');
 }
 
 // --- Actions ---

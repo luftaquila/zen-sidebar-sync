@@ -20,6 +20,12 @@ let lastSyncTime = null;
 let initialSyncDone = false;
 let schemaError = null;
 let nativeMissing = false;
+// Pending initial sync — server already has data from a prior device,
+// and this is our first connect to it. We hold the remote state here
+// and wait for the user to confirm a destructive replace before applying.
+// Until confirmed, sync stays paused (no patches sent/received).
+let pendingInitialState = null;
+let pendingInitialInfo = null;
 
 // --- Initialize ---
 
@@ -94,22 +100,34 @@ async function onRemoteStateUpdate(remoteState, sourceDevice, isAuthState = fals
 
   if (!initialSyncDone) {
     if (totalRemoteTabs === 0) {
-      // Server empty — seed from local.
+      // Server empty — this device is the AUTHORITATIVE first one. Push
+      // local state outright (replace=true) so any other devices that
+      // connect later see this exact set as the seed.
       if (syncClient.isConnected && tabMonitor.state) {
-        syncClient.sendFullState(tabMonitor.state);
+        syncClient.sendFullState(tabMonitor.state, { replace: true });
       }
+      initialSyncDone = true;
     } else {
-      // Initial connect with server data — additive merge of remote
-      // INTO local, then push local back so any local-only workspaces,
-      // folders, or tabs that the server didn't yet know about propagate
-      // to peers. Without this push, anything created on a device while
-      // the server was tracking only a subset stays stuck locally.
-      await tabApplier.applyState(remoteState, { addOnly: true });
-      if (syncClient.isConnected && tabMonitor.state) {
-        syncClient.sendFullState(tabMonitor.state);
-      }
+      // Server already has data from a prior device. Don't auto-merge —
+      // queue the state for user confirmation. The popup shows a
+      // destructive-replace prompt; until the user confirms, sync stays
+      // paused (initialSyncDone stays false → no patches flow). On
+      // confirm we apply the server state with addOnly=false (deletes
+      // local tabs/workspaces not in the server's snapshot).
+      pendingInitialState = remoteState;
+      pendingInitialInfo = {
+        workspaces: (remoteState.workspaces || []).length,
+        folders: (remoteState.folders || []).length,
+        tabs: (remoteState.tabs || []).length,
+        essentials: (remoteState.tabs || []).filter(t => t.kind === 'essential').length,
+      };
+      browser.runtime.sendMessage({
+        type: 'status_update',
+        status: 'awaiting_initial_confirm',
+        initialSyncInfo: pendingInitialInfo,
+      }).catch(() => {});
+      try { await browser.browserAction.openPopup(); } catch {}
     }
-    initialSyncDone = true;
   } else if (isAuthState) {
     // Reconnect (auth_ok while already synced) — preserve offline changes:
     // additive merge of remote, then push local state so any changes made
@@ -184,6 +202,7 @@ async function handleMessage(msg, sender) {
         lastSyncTime,
         state: tabMonitor?.state || null,
         deviceId: syncClient?.deviceId || null,
+        pendingInitialInfo,
       };
 
     case 'connect': {
@@ -196,6 +215,8 @@ async function handleMessage(msg, sender) {
       });
       syncEnabled = true;
       initialSyncDone = false;
+      pendingInitialState = null;
+      pendingInitialInfo = null;
       await syncClient.connect(serverUrl, token, deviceName);
       return { success: true };
     }
@@ -204,8 +225,33 @@ async function handleMessage(msg, sender) {
       syncClient.disconnect();
       syncEnabled = false;
       initialSyncDone = false;
+      pendingInitialState = null;
+      pendingInitialInfo = null;
       await browser.storage.local.set({ syncEnabled: false });
       return { success: true };
+
+    case 'confirm_initial_replace': {
+      // User confirmed: discard local, apply server state outright.
+      if (!pendingInitialState) return { success: false, error: 'no pending state' };
+      await tabApplier.applyState(pendingInitialState, { addOnly: false });
+      pendingInitialState = null;
+      pendingInitialInfo = null;
+      initialSyncDone = true;
+      browser.runtime.sendMessage({ type: 'status_update', status: syncStatus, lastSyncTime }).catch(() => {});
+      return { success: true };
+    }
+
+    case 'cancel_initial_sync': {
+      // User declined: disconnect to avoid touching either side.
+      syncClient.disconnect();
+      syncEnabled = false;
+      initialSyncDone = false;
+      pendingInitialState = null;
+      pendingInitialInfo = null;
+      await browser.storage.local.set({ syncEnabled: false });
+      browser.runtime.sendMessage({ type: 'status_update', status: 'disconnected', lastSyncTime }).catch(() => {});
+      return { success: true };
+    }
 
     case 'save_config': {
       const { serverUrl, token, deviceName } = msg;

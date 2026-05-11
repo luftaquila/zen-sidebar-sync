@@ -237,3 +237,43 @@ header {
 .toggle input:checked + .toggle-slider::before {
   transform: translateX(18px);
 }
+
+.initial-sync-prompt {
+  border: 1px solid #f59e0b;
+  background: rgba(245, 158, 11, 0.08);
+  border-radius: 6px;
+  padding: 10px;
+}
+.initial-sync-prompt h2 {
+  font-size: 13px;
+  color: #fbbf24;
+  margin-bottom: 6px;
+}
+.initial-sync-prompt .prompt-text {
+  font-size: 12px;
+  line-height: 1.4;
+  margin-bottom: 6px;
+}
+.initial-sync-prompt .prompt-summary {
+  list-style: none;
+  margin: 6px 0 10px 0;
+  font-size: 12px;
+  color: #cbd5e0;
+}
+.initial-sync-prompt .prompt-summary li {
+  padding: 2px 0;
+}
+.initial-sync-prompt .actions {
+  display: flex;
+  gap: 8px;
+}
+.initial-sync-prompt .btn {
+  flex: 1;
+}
+.initial-sync-prompt .btn.primary {
+  background: #ef4444;
+  color: white;
+}
+.initial-sync-prompt .btn.primary:hover {
+  background: #dc2626;
+}
