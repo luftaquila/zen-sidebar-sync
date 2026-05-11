@@ -34,6 +34,26 @@ class TabMonitor {
     this._nativeData = null;
     this._nativeLastFetch = 0;
     this._nativeAvailable = null;
+
+    // Tabs the applier just created via browser.tabs.create. Their
+    // currentURI is "about:blank" for up to several hundred ms while the
+    // real URL loads, so the runtime API capture skips them entirely
+    // (the http/https filter). Without this map, the silent recapture
+    // after apply produces a state that's MISSING the tab we just
+    // created — the very next normal capture then diffs against that
+    // gap and emits add_tab back to the server. That's the echo loop
+    // that creates duplicate tabs on every navigation.
+    /** @type {Map<string, {tab: object, expiresAt: number}>} url -> info */
+    this._pendingTabs = new Map();
+  }
+
+  /** Called by tab-applier after browser.tabs.create succeeds. */
+  recordPendingTab(remoteTab) {
+    if (!remoteTab?.url) return;
+    this._pendingTabs.set(remoteTab.url, {
+      tab: { ...remoteTab, lastModified: Date.now() },
+      expiresAt: Date.now() + 60000, // safety: drop after 60s even if URL never loads
+    });
   }
 
   async init() {
@@ -143,6 +163,26 @@ class TabMonitor {
       const newState = (source && Array.isArray(source.tabs))
         ? await this._buildFromNative(source)
         : await this._buildFromBrowserApi();
+
+      // Inject any in-flight (just-created via apply) tabs that haven't
+      // surfaced in the runtime capture yet. Without this, silent recapture
+      // produces a state missing freshly-created tabs, the next normal
+      // capture diffs against that gap, and we emit a spurious add_tab
+      // back to the server (the echo that creates duplicates on receivers).
+      if (this._pendingTabs.size > 0) {
+        const capturedUrls = new Set(newState.tabs.map(t => t.url));
+        const now = Date.now();
+        for (const [url, entry] of this._pendingTabs) {
+          if (capturedUrls.has(url)) {
+            // Real tab is now visible to capture; stop tracking.
+            this._pendingTabs.delete(url);
+          } else if (now > entry.expiresAt) {
+            this._pendingTabs.delete(url);
+          } else {
+            newState.tabs.push(entry.tab);
+          }
+        }
+      }
 
       // Reject captures where the tab count collapses unexpectedly. This catches
       // partial native reads (e.g. session store mid-write) that would otherwise
@@ -444,9 +484,22 @@ class TabMonitor {
 
 // --- Helpers (pure) ---
 
-const WS_PROPS = ['name', 'icon', 'theme', 'position'];
-const FOLDER_PROPS = ['name', 'workspaceSyncId', 'parentSyncId', 'collapsed', 'userIcon', 'position'];
-const TAB_PROPS = ['url', 'title', 'icon', 'kind', 'workspaceSyncId', 'folderSyncId', 'pinned', 'position'];
+// `position` is intentionally omitted: positions are recomputed every
+// capture from DOM order, so the value flutters at the noise floor (any
+// tab being added/removed shifts every subsequent index). Without removing
+// it from the diff, every capture emits dozens of position-only update ops
+// for tabs/folders that didn't actually move — exactly the ~600ms echo
+// storm visible on the server. We don't apply position changes anyway
+// (no reorder API), so the data is purely informational.
+//
+// `theme` is also omitted from WS_PROPS: it's an object whose runtime-API
+// representation differs by reference (and sometimes by content — Zen's
+// shallow-clone of _workspaceCache strips gradient internals), making the
+// diff fire on every capture. Theme is propagated via add_workspace at
+// creation time and via explicit setWorkspaceTheme calls only.
+const WS_PROPS = ['name', 'icon'];
+const FOLDER_PROPS = ['name', 'workspaceSyncId', 'parentSyncId', 'collapsed', 'userIcon'];
+const TAB_PROPS = ['url', 'title', 'icon', 'kind', 'workspaceSyncId', 'folderSyncId', 'pinned'];
 
 function emptyState() {
   return { schemaVersion: SCHEMA_VERSION, workspaces: [], folders: [], tabs: [] };

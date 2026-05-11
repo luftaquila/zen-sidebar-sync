@@ -404,6 +404,23 @@ class TabApplier {
 
       case 'add_tab': {
         if (!isAllowedUrl(op.tab?.url)) break;
+        const url = op.tab.url;
+        // Hard dedup: if the URL is already open locally (anywhere — visible
+        // or hidden workspace) OR is tracked as an in-flight create, do NOT
+        // create another. Devices echo each other's add_tab ops via the
+        // post-apply recapture; without this guard, every navigation across
+        // devices stacks up duplicate tabs.
+        const inState = (this.tabMonitor.state.tabs || []).some(t => t.url === url);
+        if (inState) {
+          const localTab = this.tabMonitor.state.tabs.find(t => t.url === url);
+          await this._reconcileTab(op.tab, localTab);
+          break;
+        }
+        const liveUrlsArr = await browser.zenInternals.listLiveUrls().catch(() => []);
+        if (Array.isArray(liveUrlsArr) && liveUrlsArr.includes(url)) {
+          await this._reconcileTab(op.tab, null);
+          break;
+        }
         await this._createAndPlaceTab(op.tab);
         break;
       }
@@ -454,6 +471,12 @@ class TabApplier {
       console.warn('[TabApplier] tabs.create failed:', remoteTab.url, err?.message);
       return null;
     }
+    // Tell the monitor about the just-created tab so the next (silent)
+    // recapture doesn't lose it just because currentURI is still
+    // about:blank. Without this, capture skips the tab → tabMonitor.state
+    // omits it → the very next normal capture diffs against the gap and
+    // emits a duplicate add_tab back to the server.
+    this.tabMonitor.recordPendingTab(remoteTab);
     // CRITICAL: pass tab.id through to _reconcileTab. The brand-new tab's
     // linkedBrowser.currentURI is still about:blank for a moment, so the
     // experiment API's URL-based lookup would miss it — moveTabToWorkspace,
