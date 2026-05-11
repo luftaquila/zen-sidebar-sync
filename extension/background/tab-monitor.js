@@ -285,12 +285,14 @@ class TabMonitor {
   }
 
   /**
-   * Fallback: only sees active workspace via browser API. Limited but better than nothing.
+   * Fallback when the native messaging host isn't available. Visibility is
+   * limited to the active workspace (browser.tabs.query only returns visible
+   * tabs), but we recover workspace names from per-window session storage so
+   * tabs are at least anchored to a real syncId instead of being dropped.
    */
   async _buildFromBrowserApi() {
     const now = Date.now();
     const allTabs = await browser.tabs.query({});
-    const workspaces = [];
     const tabs = [];
 
     this.workspaceUuidByName.clear();
@@ -298,29 +300,60 @@ class TabMonitor {
     this.folderLocalIdBySyncId.clear();
     this.folderSyncIdByLocalId.clear();
 
+    // Resolve workspace UUID → name from window-level session data. Zen
+    // stores the workspace list as a `zen-workspace-data` window value;
+    // without this we have no way to translate a tab's `zen-workspace-id`
+    // attribute into a stable name-based syncId.
     const wsBySrcUuid = new Map();
+    try {
+      const windows = await browser.windows.getAll();
+      const winData = await Promise.all(windows.map(w =>
+        browser.sessions.getWindowValue(w.id, 'zen-workspace-data').catch(() => null)
+      ));
+      let wsPos = 0;
+      for (const list of winData) {
+        if (!Array.isArray(list)) continue;
+        for (const zw of list) {
+          if (!zw?.uuid || wsBySrcUuid.has(zw.uuid)) continue;
+          const name = (zw.name || '').trim();
+          if (!name || UUID_NAME_RE.test(name)) continue;
+          const syncId = makeSyncId('ws', name);
+          const ws = { syncId, name, icon: zw.icon || '', position: wsPos++, lastModified: now };
+          wsBySrcUuid.set(zw.uuid, ws);
+          this.workspaceUuidByName.set(name, zw.uuid);
+          this.workspaceUuidBySyncId.set(syncId, zw.uuid);
+        }
+      }
+    } catch (e) {
+      console.warn('[TabMonitor] workspace name resolution failed:', e.message);
+    }
 
-    let pos = 0;
+    const workspaces = Array.from(wsBySrcUuid.values());
+
+    // Per-URL dedup mirroring _buildFromNative; pick canonical entry.
+    const byUrl = new Map();
+    const score = (ess, pinned) => (ess ? 1000 : 0) + (pinned ? 1 : 0);
     for (const tab of allTabs) {
       if (!tab.url || (!tab.url.startsWith('http:') && !tab.url.startsWith('https:'))) continue;
-
       const [ess, wsId] = await Promise.all([
         browser.sessions.getTabValue(tab.id, 'zen-essential').catch(() => null),
         browser.sessions.getTabValue(tab.id, 'zen-workspace-id').catch(() => null),
       ]);
-
-      let workspaceSyncId = null;
-      if (wsId) {
-        let ws = wsBySrcUuid.get(wsId);
-        if (!ws) {
-          // Without zen-sessions data we have no name. Skip — don't emit UUID-named workspace.
-          ws = null;
-        }
-        workspaceSyncId = ws?.syncId || null;
+      const existing = byUrl.get(tab.url);
+      if (!existing || score(!!ess, !!tab.pinned) > score(!!existing.ess, !!existing.tab.pinned)) {
+        byUrl.set(tab.url, { tab, ess, wsId });
       }
+    }
 
+    let pos = 0;
+    for (const { tab, ess, wsId } of byUrl.values()) {
+      const wsAnchor = wsId ? wsBySrcUuid.get(wsId) : null;
       const kind = ess ? 'essential' : (tab.pinned ? 'pinned' : 'normal');
-      if (!ess && !workspaceSyncId) continue;
+      // Non-essential tab needs a workspace anchor; without one we can't
+      // place it on receiving devices, so drop it from sync rather than
+      // emitting a tab with workspaceSyncId=null (which the applier would
+      // route to the active workspace, creating duplicates).
+      if (!ess && !wsAnchor) continue;
 
       tabs.push({
         syncId: makeSyncId('tab', tab.url),
@@ -328,7 +361,7 @@ class TabMonitor {
         title: tab.title || '',
         icon: tab.favIconUrl || '',
         kind,
-        workspaceSyncId,
+        workspaceSyncId: wsAnchor ? wsAnchor.syncId : null,
         folderSyncId: null,
         pinned: kind !== 'normal',
         position: pos++,
@@ -341,6 +374,7 @@ class TabMonitor {
       workspaces,
       folders: [],
       tabs,
+      _fallback: true,
     };
   }
 

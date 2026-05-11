@@ -23,7 +23,7 @@ async function init() {
 
   browser.runtime.onMessage.addListener((msg) => {
     if (msg.type === 'status_update') {
-      updateStatus(msg.status);
+      updateStatus(msg.status, msg);
       if (msg.lastSyncTime) {
         lastSyncTimestamp = msg.lastSyncTime;
         updateLastSync(msg.lastSyncTime);
@@ -120,8 +120,12 @@ async function forcePull() {
 function updateUI(status) {
   if (!status) return;
 
-  updateStatus(status.syncStatus);
+  updateStatus(status.syncStatus, status);
   syncToggle.checked = status.syncEnabled;
+
+  // Persistent errors override the sync-status badge for banner rendering.
+  if (status.nativeMissing) renderBanner('native_missing', status);
+  else if (status.schemaError) renderBanner('schema_mismatch', status);
 
   if (status.syncEnabled && status.syncStatus === 'connected') {
     infoSection.classList.remove('hidden');
@@ -137,7 +141,7 @@ function updateUI(status) {
   }
 }
 
-function updateStatus(status) {
+function updateStatus(status, ctx = {}) {
   statusBadge.className = `status-badge ${status}`;
 
   const labels = {
@@ -148,31 +152,68 @@ function updateStatus(status) {
     error: 'Error',
     auth_failed: 'Auth Failed',
     failed: 'Failed',
+    schema_mismatch: 'Schema mismatch',
+    native_missing: 'Native host missing',
   };
 
   statusText.textContent = labels[status] || status;
+  renderBanner(status, ctx);
 
   if (status === 'connected') {
     infoSection.classList.remove('hidden');
     browser.runtime.sendMessage({ type: 'get_status' }).then(s => {
       if (s?.state) updateStats(s.state);
     });
-  } else if (status === 'auth_failed' || status === 'failed') {
+  } else if (status === 'auth_failed' || status === 'failed' || status === 'schema_mismatch' || status === 'native_missing') {
     syncToggle.checked = false;
     infoSection.classList.add('hidden');
+  }
+}
+
+function renderBanner(status, ctx) {
+  let host = document.querySelector('#syncBanner');
+  if (!host) {
+    host = document.createElement('div');
+    host.id = 'syncBanner';
+    host.style.cssText = 'padding:8px;margin:8px;border-radius:6px;font-size:12px;display:none;';
+    document.querySelector('.container')?.insertBefore(host, document.querySelector('.container')?.firstChild);
+  }
+  if (status === 'schema_mismatch') {
+    host.style.display = 'block';
+    host.style.background = '#fde7e7';
+    host.style.color = '#900';
+    host.textContent = ctx.schemaError || 'Server schema is incompatible. Reset server state.';
+  } else if (status === 'native_missing') {
+    host.style.display = 'block';
+    host.style.background = '#fff4d6';
+    host.style.color = '#7a4f00';
+    host.textContent = 'Native messaging host not installed. Install it before enabling sync to avoid creating duplicate tabs.';
+  } else {
+    host.style.display = 'none';
   }
 }
 
 function updateStats(state) {
   if (!state) return;
 
+  // schema v2: flat tabs[] with kind, plus workspaces[] and folders[]
+  if (Array.isArray(state.tabs)) {
+    const tabs = state.tabs;
+    const essentials = tabs.filter(t => t.kind === 'essential').length;
+    const workspaces = (state.workspaces || []).length;
+    $('#essentialCount').textContent = essentials;
+    $('#workspaceCount').textContent = workspaces;
+    $('#tabCount').textContent = tabs.length;
+    return;
+  }
+
+  // legacy v1 fallback (defensive — should never hit on v2 server)
   const essentials = (state.essentials || []).length;
   const workspaces = (state.workspaces || []).length;
   let tabs = 0;
   for (const ws of (state.workspaces || [])) {
     tabs += (ws.tabs || []).length + (ws.pinnedTabs || []).length;
   }
-
   $('#essentialCount').textContent = essentials;
   $('#workspaceCount').textContent = workspaces;
   $('#tabCount').textContent = tabs;

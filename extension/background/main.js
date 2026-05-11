@@ -19,6 +19,7 @@ let syncStatus = 'disconnected';
 let lastSyncTime = null;
 let initialSyncDone = false;
 let schemaError = null;
+let nativeMissing = false;
 
 // --- Initialize ---
 
@@ -76,6 +77,18 @@ async function onRemoteStateUpdate(remoteState, sourceDevice, isAuthState = fals
     return;
   }
   schemaError = null;
+
+  // Native host is required for accurate cross-workspace tab tracking. Without
+  // it, local capture only sees the active workspace and applyState would
+  // create duplicate tabs for everything in hidden workspaces. Refuse to apply
+  // and surface to popup so the user knows to install the native host.
+  if (tabMonitor?._nativeAvailable === false && (remoteState.tabs || []).length > 5) {
+    nativeMissing = true;
+    console.error('[ZenSync] Native host missing — apply blocked');
+    browser.runtime.sendMessage({ type: 'status_update', status: 'native_missing' }).catch(() => {});
+    return;
+  }
+  nativeMissing = false;
 
   const totalRemoteTabs = (remoteState.tabs || []).length;
 
@@ -154,6 +167,7 @@ async function handleMessage(msg, sender) {
         syncEnabled,
         syncStatus,
         schemaError,
+        nativeMissing,
         lastSyncTime,
         state: tabMonitor?.state || null,
         deviceId: syncClient?.deviceId || null,

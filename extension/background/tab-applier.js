@@ -62,6 +62,19 @@ class TabApplier {
       const remoteTotal = (remoteState.tabs || []).length;
       if (!addOnly && remoteTotal === 0) addOnly = true;
 
+      // Capture-quality guard: if local state was built from the browser-API
+      // fallback (no native host), it only contains active-workspace tabs.
+      // Applying remote state in that case would create duplicates of every
+      // tab living in a hidden workspace, since localTabsByUrl can't see them.
+      // Force the apply to no-op and surface an error so the user installs
+      // the native host before sync touches anything.
+      if (local._fallback && remoteTotal > 5) {
+        const msg = 'native host missing — apply blocked to prevent duplicate tabs';
+        console.error('[TabApplier]', msg);
+        browser.runtime.sendMessage({ type: 'status_update', status: 'native_missing', error: msg }).catch(() => {});
+        return;
+      }
+
       // 1. Workspaces — ensure every remote workspace has a local UUID
       // mapping before we place any tabs. Three resolution paths:
       //   a) syncId matches local (tabMonitor already populated the map).
