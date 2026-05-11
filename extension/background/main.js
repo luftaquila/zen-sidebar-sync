@@ -176,6 +176,65 @@ function onDeviceEvent(event) {
   console.log(`[ZenSync] ${event.type}: ${event.deviceName}`);
 }
 
+// --- One-shot admin WS ---
+// Open a transient WebSocket using stored config, auth, send the admin
+// command, await admin_ok, then close. Used when the user wants to run
+// an admin action but the persistent sync connection is closed (e.g.
+// they just clicked "Disable sync on all" which disconnected this
+// device too). syncEnabled is left untouched — this isn't "reconnect",
+// it's "fire one command and disappear".
+async function sendOneShotAdmin(cmd) {
+  const cfg = await browser.storage.local.get(['serverUrl', 'syncToken', 'deviceId']);
+  if (!cfg.serverUrl || !cfg.syncToken) {
+    return { success: false, error: 'Sync config missing — set server URL and token first.' };
+  }
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      try { ws.close(); } catch {}
+      resolve(result);
+    };
+    let ws;
+    try {
+      ws = new WebSocket(cfg.serverUrl);
+    } catch (e) {
+      return finish({ success: false, error: `WS open failed: ${e.message}` });
+    }
+    const timeout = setTimeout(() => finish({ success: false, error: 'timed out' }), 10000);
+    ws.onopen = () => {
+      ws.send(JSON.stringify({
+        type: 'auth',
+        token: cfg.syncToken,
+        deviceId: cfg.deviceId || 'admin-oneshot',
+        deviceName: 'admin-oneshot',
+      }));
+    };
+    ws.onmessage = (event) => {
+      let msg;
+      try { msg = JSON.parse(event.data); } catch { return; }
+      if (msg.type === 'auth_ok') {
+        ws.send(JSON.stringify(cmd));
+      } else if (msg.type === 'admin_ok') {
+        clearTimeout(timeout);
+        finish({ success: true });
+      } else if (msg.type === 'error') {
+        clearTimeout(timeout);
+        finish({ success: false, error: msg.message });
+      }
+    };
+    ws.onerror = () => {
+      clearTimeout(timeout);
+      finish({ success: false, error: 'WS error' });
+    };
+    ws.onclose = () => {
+      clearTimeout(timeout);
+      if (!settled) finish({ success: false, error: 'closed before admin_ok' });
+    };
+  });
+}
+
 // --- Force Disable (admin) ---
 
 async function onForceDisable(reason) {
@@ -268,15 +327,23 @@ async function handleMessage(msg, sender) {
     }
 
     case 'admin_reset_state': {
-      if (!syncClient.isConnected) return { success: false, error: 'not connected' };
-      syncClient.sendAdminResetState();
-      return { success: true };
+      // If we're connected, send through the live socket. Otherwise open
+      // a one-shot WS using stored config so the user doesn't have to
+      // re-enable sync just to issue the admin command — a common case
+      // because "Disable sync on all" disconnects this device too.
+      if (syncClient.isConnected) {
+        syncClient.sendAdminResetState();
+        return { success: true };
+      }
+      return await sendOneShotAdmin({ type: 'admin_reset_state' });
     }
 
     case 'admin_disable_all': {
-      if (!syncClient.isConnected) return { success: false, error: 'not connected' };
-      syncClient.sendAdminDisableAll();
-      return { success: true };
+      if (syncClient.isConnected) {
+        syncClient.sendAdminDisableAll();
+        return { success: true };
+      }
+      return await sendOneShotAdmin({ type: 'admin_disable_all' });
     }
 
     case 'save_config': {

@@ -206,8 +206,14 @@ async function adminDisableAll() {
   if (!ok) return;
   const btn = $('#adminDisableAllBtn');
   btn.disabled = true; btn.textContent = 'Sending…';
-  await browser.runtime.sendMessage({ type: 'admin_disable_all' });
-  btn.disabled = false; btn.textContent = 'Sent';
+  const result = await browser.runtime.sendMessage({ type: 'admin_disable_all' });
+  if (result?.success) {
+    btn.textContent = 'Sent';
+  } else {
+    btn.textContent = 'Failed';
+    await customConfirm(`Disable sync on all failed: ${result?.error || 'unknown error'}`, { okText: 'OK', okClass: 'primary' });
+  }
+  btn.disabled = false;
   setTimeout(() => { btn.textContent = 'Disable sync on all'; }, 1500);
 }
 
@@ -219,8 +225,14 @@ async function adminResetState() {
   if (!ok) return;
   const btn = $('#adminResetStateBtn');
   btn.disabled = true; btn.textContent = 'Resetting…';
-  await browser.runtime.sendMessage({ type: 'admin_reset_state' });
-  btn.disabled = false; btn.textContent = 'Reset';
+  const result = await browser.runtime.sendMessage({ type: 'admin_reset_state' });
+  if (result?.success) {
+    btn.textContent = 'Done';
+  } else {
+    btn.textContent = 'Failed';
+    await customConfirm(`Reset failed: ${result?.error || 'unknown error'}`, { okText: 'OK', okClass: 'primary' });
+  }
+  btn.disabled = false;
   setTimeout(() => { btn.textContent = 'Reset server state'; }, 1500);
 }
 
