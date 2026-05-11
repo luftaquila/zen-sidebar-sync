@@ -1,16 +1,24 @@
 /**
- * Tab Applier - Applies remote state to local browser
+ * Tab Applier - Applies remote v2 state/patches to the local Zen Browser.
  *
- * After every apply, recaptures tabMonitor state to prevent stale diffs.
- * Sets Zen session values (zen-essential, zen-workspace-id) on created tabs.
+ * Identity contract:
+ *   - workspaces: name-based syncId -> local Zen UUID via tabMonitor.workspaceUuidBySyncId
+ *   - folders:    path-based syncId -> local Zen folder DOM id via tabMonitor.folderLocalIdBySyncId
+ *   - tabs:       url-based syncId; reconciliation finds the local tab by URL
+ *
+ * Every Zen-internal mutation goes through the experiment API (browser.zenInternals.*).
+ * Each call is best-effort and returns {success, error?}; failures are logged but never
+ * abort the apply — partial sync is preferable to corrupted state.
+ *
+ * After every apply, captureFullState({silent: true}) refreshes the maps and stamps
+ * tabMonitor.state to current ground truth, preventing stale-diff echo loops.
  */
 
 const ALLOWED_SCHEMES = ['http:', 'https:'];
 
 function isAllowedUrl(url) {
   if (!url) return false;
-  try { return ALLOWED_SCHEMES.includes(new URL(url).protocol); }
-  catch { return false; }
+  try { return ALLOWED_SCHEMES.includes(new URL(url).protocol); } catch { return false; }
 }
 
 class TabApplier {
@@ -18,143 +26,148 @@ class TabApplier {
     this.tabMonitor = tabMonitor;
   }
 
+  // --- Full state apply ---
+
   async applyState(remoteState, { addOnly = false } = {}) {
     this.tabMonitor.setApplying(true);
-
     try {
-      // Use tabMonitor.state (from native host / session store) for ALL local URLs
-      // browser.tabs.query() only returns active workspace tabs — using it causes
-      // hidden workspace tabs to be "not found" and duplicated on merge
-      const allLocalUrls = new Set();
-      for (const ess of (this.tabMonitor.state?.essentials || [])) {
-        allLocalUrls.add(ess.url);
-      }
-      for (const ws of (this.tabMonitor.state?.workspaces || [])) {
-        for (const t of [...(ws.tabs || []), ...(ws.pinnedTabs || [])]) {
-          allLocalUrls.add(t.url);
-        }
-      }
+      if (!remoteState || !Array.isArray(remoteState.tabs)) return;
 
-      // Also get browser API tabs for update operations (pinned state, etc.)
-      const localTabs = await browser.tabs.query({});
-      const localByUrl = new Map();
-      for (const t of localTabs) {
-        if (!t.url) continue;
-        if (!localByUrl.has(t.url)) localByUrl.set(t.url, []);
-        localByUrl.get(t.url).push(t);
-      }
+      const local = this.tabMonitor.state || {};
+      const localTabsByUrl = new Map((local.tabs || []).map(t => [t.url, t]));
+      const localFoldersBySyncId = new Map((local.folders || []).map(f => [f.syncId, f]));
+      const localWsBySyncId = new Map((local.workspaces || []).map(w => [w.syncId, w]));
 
-      const remoteUrls = new Set();
+      const remoteTotal = (remoteState.tabs || []).length;
+      if (!addOnly && remoteTotal === 0) addOnly = true;
 
-      const totalRemoteTabs = (remoteState.essentials || []).length
-        + (remoteState.workspaces || []).reduce(
-          (sum, ws) => sum + (ws.tabs || []).length + (ws.pinnedTabs || []).length, 0);
-
-      // Empty remote state = likely corruption — force addOnly
-      if (!addOnly && totalRemoteTabs === 0) {
-        addOnly = true;
-      }
-
-      // 1. Essentials
-      for (const ess of (remoteState.essentials || [])) {
-        if (!isAllowedUrl(ess.url)) continue;
-        remoteUrls.add(ess.url);
-
-        if (!allLocalUrls.has(ess.url)) {
-          await this._createTab(ess.url, { pinned: true, essential: true });
-          allLocalUrls.add(ess.url);
-        } else {
-          // Ensure essential + pinned on visible tabs
-          const locals = localByUrl.get(ess.url);
-          if (locals && locals[0] && !locals[0].pinned) {
-            await browser.tabs.update(locals[0].id, { pinned: true }).catch(() => {});
-          }
-        }
-      }
-
-      // 2. Workspace tabs
+      // 1. Workspaces — create missing, rename mismatched.
       for (const ws of (remoteState.workspaces || [])) {
-        const wsUuid = this.tabMonitor.workspaceUuidMap.get(ws.name);
-
-        for (const tab of (ws.pinnedTabs || [])) {
-          if (!isAllowedUrl(tab.url)) continue;
-          remoteUrls.add(tab.url);
-
-          if (!allLocalUrls.has(tab.url)) {
-            await this._createTab(tab.url, { pinned: true, workspaceId: wsUuid });
-            allLocalUrls.add(tab.url);
+        const localWs = localWsBySyncId.get(ws.syncId);
+        if (!localWs) {
+          const r = await browser.zenInternals.createWorkspace({ name: ws.name, icon: ws.icon });
+          if (r?.success && r.uuid) {
+            this.tabMonitor.workspaceUuidByName.set(ws.name, r.uuid);
+            this.tabMonitor.workspaceUuidBySyncId.set(ws.syncId, r.uuid);
           } else {
-            const locals = localByUrl.get(tab.url);
-            if (locals && locals[0] && !locals[0].pinned) {
-              await browser.tabs.update(locals[0].id, { pinned: true }).catch(() => {});
+            console.warn('[TabApplier] createWorkspace failed:', ws.name, r?.error);
+          }
+        } else if (localWs.name !== ws.name || localWs.icon !== ws.icon) {
+          const uuid = this.tabMonitor.workspaceUuidBySyncId.get(ws.syncId);
+          if (uuid) await browser.zenInternals.renameWorkspace({ uuid, name: ws.name, icon: ws.icon });
+        }
+      }
+
+      // 2. Tabs — create missing, reconcile properties on mismatched.
+      for (const tab of (remoteState.tabs || [])) {
+        if (!isAllowedUrl(tab.url)) continue;
+        const localTab = localTabsByUrl.get(tab.url);
+        if (!localTab) {
+          await this._createAndPlaceTab(tab);
+        } else {
+          await this._reconcileTab(tab, localTab);
+        }
+      }
+
+      // 3. Folders — topologically sorted: top-level first, then children.
+      const remoteFolders = topoSortFolders(remoteState.folders || []);
+      for (const f of remoteFolders) {
+        const localFld = localFoldersBySyncId.get(f.syncId);
+        const wsUuid = this.tabMonitor.workspaceUuidBySyncId.get(f.workspaceSyncId);
+        const parentId = f.parentSyncId
+          ? this.tabMonitor.folderLocalIdBySyncId.get(f.parentSyncId) || null
+          : null;
+        const tabUrls = (remoteState.tabs || [])
+          .filter(t => t.folderSyncId === f.syncId && t.kind === 'pinned')
+          .map(t => t.url);
+
+        if (!localFld) {
+          const r = await browser.zenInternals.createFolder({
+            name: f.name,
+            collapsed: f.collapsed,
+            userIcon: f.userIcon,
+            workspaceUuid: wsUuid,
+            parentId,
+            tabUrls,
+          });
+          if (r?.success && r.id) {
+            this.tabMonitor.folderLocalIdBySyncId.set(f.syncId, r.id);
+            this.tabMonitor.folderSyncIdByLocalId.set(r.id, f.syncId);
+          } else {
+            console.warn('[TabApplier] createFolder failed:', f.name, r?.error);
+          }
+        } else {
+          const folderId = this.tabMonitor.folderLocalIdBySyncId.get(f.syncId);
+          if (folderId) {
+            if (localFld.name !== f.name) await browser.zenInternals.renameFolder({ folderId, name: f.name });
+            if (localFld.collapsed !== f.collapsed) await browser.zenInternals.setFolderCollapsed({ folderId, collapsed: !!f.collapsed });
+            if ((localFld.userIcon || '') !== (f.userIcon || '')) await browser.zenInternals.setFolderUserIcon({ folderId, userIcon: f.userIcon || '' });
+            if (localFld.parentSyncId !== f.parentSyncId) {
+              await browser.zenInternals.setFolderParent({ folderId, parentId });
             }
           }
         }
+      }
 
-        for (const tab of (ws.tabs || [])) {
-          if (!isAllowedUrl(tab.url)) continue;
-          remoteUrls.add(tab.url);
-
-          if (!allLocalUrls.has(tab.url)) {
-            await this._createTab(tab.url, { pinned: false, workspaceId: wsUuid });
-            allLocalUrls.add(tab.url);
-          }
+      // 4. Tab → folder membership (folders may have been created in step 3).
+      for (const tab of (remoteState.tabs || [])) {
+        if (tab.kind !== 'pinned' || !tab.folderSyncId) continue;
+        const localTab = localTabsByUrl.get(tab.url);
+        if (localTab && localTab.folderSyncId === tab.folderSyncId) continue;
+        const folderId = this.tabMonitor.folderLocalIdBySyncId.get(tab.folderSyncId);
+        if (folderId) {
+          await browser.zenInternals.addTabToFolder({ tabUrl: tab.url, folderId });
         }
       }
 
-      // 3. Folder restoration disabled — experiment API DOM selectors
-      // (zen-folder, f.label) are unverified and cause duplicate folders.
-      // TODO: enable after verifying Zen's actual DOM structure in browser.
-      // await this._applyFolders(remoteState.folders || []);
-
-      // 4. Remove tabs not in remote state
+      // 5. Removal pass.
       if (!addOnly) {
-        for (const local of localTabs) {
-          if (!local.url || local.url.startsWith('about:') || local.url.startsWith('moz-extension:')) continue;
-          if (!remoteUrls.has(local.url)) {
-            await browser.tabs.remove(local.id).catch(() => {});
+        const remoteUrls = new Set((remoteState.tabs || []).map(t => t.url));
+        for (const t of (local.tabs || [])) {
+          if (!remoteUrls.has(t.url)) {
+            await browser.zenInternals.removeTab({ tabUrl: t.url });
           }
         }
-
-        const remaining = await browser.tabs.query({});
-        if (remaining.length === 0) {
-          await browser.tabs.create({});
+        const remoteFolderIds = new Set((remoteState.folders || []).map(f => f.syncId));
+        for (const f of (local.folders || [])) {
+          if (!remoteFolderIds.has(f.syncId)) {
+            const folderId = this.tabMonitor.folderLocalIdBySyncId.get(f.syncId);
+            if (folderId) await browser.zenInternals.deleteFolder({ folderId });
+          }
+        }
+        const remoteWsIds = new Set((remoteState.workspaces || []).map(w => w.syncId));
+        for (const w of (local.workspaces || [])) {
+          if (!remoteWsIds.has(w.syncId)) {
+            const uuid = this.tabMonitor.workspaceUuidBySyncId.get(w.syncId);
+            if (uuid) await browser.zenInternals.deleteWorkspace({ uuid });
+          }
         }
       }
     } catch (err) {
       console.error('[TabApplier] applyState error:', err);
     } finally {
-      // Recapture to sync tabMonitor.state with actual browser state,
-      // then release the guard. This prevents stale diffs after apply.
       await this.tabMonitor.captureFullState({ silent: true });
       this.tabMonitor.setApplying(false);
     }
   }
 
+  // --- Patch apply ---
+
   async applyPatch(patch) {
     this.tabMonitor.setApplying(true);
-
     try {
-      // Build full URL set from tabMonitor.state (all workspaces) for dedup
-      const allLocalUrls = new Set();
-      for (const ess of (this.tabMonitor.state?.essentials || [])) {
-        allLocalUrls.add(ess.url);
-      }
-      for (const ws of (this.tabMonitor.state?.workspaces || [])) {
-        for (const t of [...(ws.tabs || []), ...(ws.pinnedTabs || [])]) {
-          allLocalUrls.add(t.url);
+      if (!patch || !Array.isArray(patch.operations)) return;
+
+      // Process in dependency order: workspaces → folders → tabs → tab membership → removals.
+      const ops = [...patch.operations];
+      ops.sort((a, b) => opPriority(a) - opPriority(b));
+
+      for (const op of ops) {
+        try {
+          await this._applyOp(op);
+        } catch (e) {
+          console.warn('[TabApplier] op failed:', op.type, e?.message);
         }
-      }
-
-      // Browser API tabs for update/remove operations on visible tabs
-      const allTabs = await browser.tabs.query({});
-      const byUrl = new Map();
-      for (const t of allTabs) {
-        if (t.url) byUrl.set(t.url, t);
-      }
-
-      for (const op of patch.operations) {
-        await this._applyOp(op, byUrl, allLocalUrls);
       }
     } catch (err) {
       console.error('[TabApplier] applyPatch error:', err);
@@ -164,169 +177,177 @@ class TabApplier {
     }
   }
 
-  async _applyOp(op, byUrl, allLocalUrls) {
+  async _applyOp(op) {
+    const wsMap = this.tabMonitor.workspaceUuidBySyncId;
+    const wsByName = this.tabMonitor.workspaceUuidByName;
+    const fldMap = this.tabMonitor.folderLocalIdBySyncId;
+    const fldRevMap = this.tabMonitor.folderSyncIdByLocalId;
+
     switch (op.type) {
-      case 'add_essential': {
-        if (!isAllowedUrl(op.tab?.url)) break;
-        if (allLocalUrls.has(op.tab.url)) {
-          // Tab exists (possibly in hidden workspace) — just update visible one if needed
-          const existing = byUrl.get(op.tab.url);
-          if (existing && !existing.pinned) {
-            await browser.tabs.update(existing.id, { pinned: true }).catch(() => {});
-          }
-          if (existing) {
-            await browser.sessions.setTabValue(existing.id, 'zen-essential', true).catch(() => {});
-          }
-          break;
-        }
-        const existing = byUrl.get(op.tab.url);
-        if (!existing) {
-          const tab = await this._createTab(op.tab.url, { pinned: true, essential: true });
-          if (tab) {
-            byUrl.set(op.tab.url, tab);
-            allLocalUrls.add(op.tab.url);
-          }
-        } else {
-          if (!existing.pinned) {
-            await browser.tabs.update(existing.id, { pinned: true }).catch(() => {});
-          }
-          await browser.sessions.setTabValue(existing.id, 'zen-essential', true).catch(() => {});
+      case 'add_workspace': {
+        const ws = op.workspace;
+        if (!ws?.name) break;
+        const r = await browser.zenInternals.createWorkspace({ name: ws.name, icon: ws.icon });
+        if (r?.success && r.uuid) {
+          wsMap.set(ws.syncId, r.uuid);
+          wsByName.set(ws.name, r.uuid);
         }
         break;
       }
-
-      case 'remove_essential':
-      case 'remove_tab': {
-        if (op.url) {
-          const tab = byUrl.get(op.url);
-          if (tab) {
-            await browser.tabs.remove(tab.id).catch(() => {});
-            byUrl.delete(op.url);
-          }
+      case 'update_workspace': {
+        const uuid = wsMap.get(op.syncId);
+        if (uuid && op.changes) {
+          await browser.zenInternals.renameWorkspace({ uuid, name: op.changes.name, icon: op.changes.icon });
         }
         break;
       }
+      case 'remove_workspace': {
+        const uuid = wsMap.get(op.syncId);
+        if (uuid) await browser.zenInternals.deleteWorkspace({ uuid });
+        wsMap.delete(op.syncId);
+        break;
+      }
 
-      case 'update_essential':
-      case 'update_tab': {
-        if (op.oldUrl && op.changes?.url && op.oldUrl !== op.changes.url) {
-          const tab = byUrl.get(op.oldUrl);
-          if (tab && isAllowedUrl(op.changes.url)) {
-            await browser.tabs.update(tab.id, { url: op.changes.url }).catch(() => {});
-            byUrl.delete(op.oldUrl);
-            byUrl.set(op.changes.url, tab);
-          }
+      case 'add_folder': {
+        const f = op.folder;
+        if (!f?.name) break;
+        const wsUuid = wsMap.get(f.workspaceSyncId);
+        const parentId = f.parentSyncId ? fldMap.get(f.parentSyncId) || null : null;
+        const r = await browser.zenInternals.createFolder({
+          name: f.name,
+          collapsed: f.collapsed,
+          userIcon: f.userIcon,
+          workspaceUuid: wsUuid,
+          parentId,
+        });
+        if (r?.success && r.id) {
+          fldMap.set(f.syncId, r.id);
+          fldRevMap.set(r.id, f.syncId);
         }
+        break;
+      }
+      case 'update_folder': {
+        const folderId = fldMap.get(op.syncId);
+        if (!folderId || !op.changes) break;
+        if ('name' in op.changes) await browser.zenInternals.renameFolder({ folderId, name: op.changes.name });
+        if ('collapsed' in op.changes) await browser.zenInternals.setFolderCollapsed({ folderId, collapsed: !!op.changes.collapsed });
+        if ('userIcon' in op.changes) await browser.zenInternals.setFolderUserIcon({ folderId, userIcon: op.changes.userIcon || '' });
+        if ('parentSyncId' in op.changes) {
+          const parentId = op.changes.parentSyncId ? fldMap.get(op.changes.parentSyncId) || null : null;
+          await browser.zenInternals.setFolderParent({ folderId, parentId });
+        }
+        break;
+      }
+      case 'remove_folder': {
+        const folderId = fldMap.get(op.syncId);
+        if (folderId) {
+          await browser.zenInternals.deleteFolder({ folderId });
+          fldRevMap.delete(folderId);
+        }
+        fldMap.delete(op.syncId);
         break;
       }
 
       case 'add_tab': {
         if (!isAllowedUrl(op.tab?.url)) break;
-        if (allLocalUrls.has(op.tab.url)) break;
-        const wsUuid = op.workspaceName
-          ? this.tabMonitor.workspaceUuidMap.get(op.workspaceName)
-          : null;
-        const tab = await this._createTab(op.tab.url, {
-          pinned: op.pinned || false,
-          workspaceId: wsUuid,
-        });
-        if (tab) {
-          byUrl.set(op.tab.url, tab);
-          allLocalUrls.add(op.tab.url);
-        }
+        await this._createAndPlaceTab(op.tab);
         break;
       }
-
-      case 'add_workspace': {
-        if (!op.workspace) break;
-        const wsUuid2 = this.tabMonitor.workspaceUuidMap.get(op.workspace.name);
-        for (const tab of (op.workspace.pinnedTabs || [])) {
-          if (isAllowedUrl(tab.url) && !allLocalUrls.has(tab.url)) {
-            const created = await this._createTab(tab.url, { pinned: true, workspaceId: wsUuid2 });
-            if (created) {
-              byUrl.set(tab.url, created);
-              allLocalUrls.add(tab.url);
-            }
-          }
-        }
-        for (const tab of (op.workspace.tabs || [])) {
-          if (isAllowedUrl(tab.url) && !allLocalUrls.has(tab.url)) {
-            const created = await this._createTab(tab.url, { pinned: false, workspaceId: wsUuid2 });
-            if (created) {
-              byUrl.set(tab.url, created);
-              allLocalUrls.add(tab.url);
-            }
-          }
-        }
+      case 'update_tab': {
+        const tab = op.tab;
+        if (!tab?.url) break;
+        await this._reconcileTab(tab, null);
         break;
       }
-
-      case 'remove_workspace': {
-        if (!op.workspace) break;
-        for (const tab of [...(op.workspace.tabs || []), ...(op.workspace.pinnedTabs || [])]) {
-          if (tab.url) {
-            const local = byUrl.get(tab.url);
-            if (local) {
-              await browser.tabs.remove(local.id).catch(() => {});
-              byUrl.delete(tab.url);
-            }
-          }
-        }
+      case 'remove_tab': {
+        const url = op.url;
+        if (url) await browser.zenInternals.removeTab({ tabUrl: url });
         break;
       }
     }
   }
 
-  async _applyFolders(remoteFolders) {
-    if (!remoteFolders || remoteFolders.length === 0) return;
+  // --- Tab placement primitives ---
 
+  async _createAndPlaceTab(remoteTab) {
+    if (!isAllowedUrl(remoteTab.url)) return null;
+    let tab;
     try {
-      if (typeof browser.zenInternals === 'undefined') {
-        console.warn('[TabApplier] zenInternals experiment API not available — folder sync skipped');
-        return;
-      }
-
-      // Get existing local folders to avoid duplicates
-      const localFolders = await browser.zenInternals.getFolders();
-      const localNames = new Set(localFolders.map(f => f.name));
-
-      for (const folder of remoteFolders) {
-        if (!folder.name || localNames.has(folder.name)) continue;
-
-        const result = await browser.zenInternals.createFolder({
-          name: folder.name,
-          collapsed: folder.collapsed || false,
-          userIcon: folder.userIcon || '',
-          workspaceName: folder.workspaceName || '',
-          tabUrls: folder.tabUrls || [],
-        });
-
-        if (result.success) {
-          localNames.add(folder.name);
-        } else {
-          console.warn(`[TabApplier] createFolder failed: ${folder.name}`, result.error);
-        }
-      }
-    } catch (e) {
-      console.warn('[TabApplier] folder apply error:', e.message);
-    }
-  }
-
-  async _createTab(url, { pinned = false, essential = false, workspaceId = null } = {}) {
-    try {
-      const tab = await browser.tabs.create({ url, pinned, active: false });
-      if (essential) {
-        await browser.sessions.setTabValue(tab.id, 'zen-essential', true).catch(() => {});
-      }
-      if (workspaceId && workspaceId !== '__default__') {
-        await browser.sessions.setTabValue(tab.id, 'zen-workspace-id', workspaceId).catch(() => {});
-      }
-      return tab;
+      tab = await browser.tabs.create({ url: remoteTab.url, active: false });
     } catch (err) {
-      console.error(`[TabApplier] create failed: ${url}`, err);
+      console.warn('[TabApplier] tabs.create failed:', remoteTab.url, err?.message);
       return null;
     }
+    await this._reconcileTab(remoteTab, null);
+    return tab;
   }
+
+  async _reconcileTab(remoteTab, localTab) {
+    const url = remoteTab.url;
+    const wsUuid = remoteTab.workspaceSyncId
+      ? this.tabMonitor.workspaceUuidBySyncId.get(remoteTab.workspaceSyncId)
+      : null;
+
+    if (remoteTab.kind === 'essential') {
+      if (!localTab || localTab.kind !== 'essential') {
+        await browser.zenInternals.setEssential({ tabUrl: url, essential: true });
+      }
+    } else {
+      if (localTab && localTab.kind === 'essential') {
+        await browser.zenInternals.setEssential({ tabUrl: url, essential: false });
+      }
+      if (wsUuid && (!localTab || localTab.workspaceSyncId !== remoteTab.workspaceSyncId)) {
+        await browser.zenInternals.moveTabToWorkspace({ tabUrl: url, workspaceUuid: wsUuid });
+      }
+      const wantPinned = remoteTab.kind === 'pinned';
+      if (!localTab || localTab.pinned !== wantPinned) {
+        await browser.zenInternals.setPinned({ tabUrl: url, pinned: wantPinned });
+      }
+    }
+
+    // Folder membership (only meaningful for pinned tabs)
+    if (remoteTab.kind === 'pinned' && remoteTab.folderSyncId) {
+      if (!localTab || localTab.folderSyncId !== remoteTab.folderSyncId) {
+        const folderId = this.tabMonitor.folderLocalIdBySyncId.get(remoteTab.folderSyncId);
+        if (folderId) await browser.zenInternals.addTabToFolder({ tabUrl: url, folderId });
+      }
+    } else if (localTab?.folderSyncId && !remoteTab.folderSyncId) {
+      await browser.zenInternals.removeTabFromFolder({ tabUrl: url });
+    }
+  }
+}
+
+// --- Helpers ---
+
+function opPriority(op) {
+  switch (op.type) {
+    case 'add_workspace':    return 1;
+    case 'update_workspace': return 2;
+    case 'add_folder':       return 3;
+    case 'update_folder':    return 4;
+    case 'add_tab':          return 5;
+    case 'update_tab':       return 6;
+    case 'remove_tab':       return 7;
+    case 'remove_folder':    return 8;
+    case 'remove_workspace': return 9;
+    default:                 return 50;
+  }
+}
+
+function topoSortFolders(folders) {
+  const bySyncId = new Map(folders.map(f => [f.syncId, f]));
+  const visited = new Set();
+  const out = [];
+  function visit(f) {
+    if (!f || visited.has(f.syncId)) return;
+    visited.add(f.syncId);
+    if (f.parentSyncId && bySyncId.has(f.parentSyncId)) {
+      visit(bySyncId.get(f.parentSyncId));
+    }
+    out.push(f);
+  }
+  for (const f of folders) visit(f);
+  return out;
 }
 
 export default TabApplier;

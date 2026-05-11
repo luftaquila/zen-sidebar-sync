@@ -3,94 +3,313 @@
 
 "use strict";
 
+/*
+ * Wrapper around Zen Browser internal globals.
+ * Verified call shapes (zen-browser/desktop @ HEAD, May 2026):
+ *   gZenWorkspaces.createAndSaveWorkspace(name, icon, dontChange, containerTabId, opts)
+ *     -> resolves to workspaceData {uuid, name, icon, ...}    (ZenSpaceManager.mjs:2562)
+ *   gZenWorkspaces.saveWorkspace(workspaceData)                (ZenSpaceManager.mjs:1206)
+ *   gZenWorkspaces.removeWorkspace(uuid)        -> Promise     (ZenSpaceManager.mjs:1222)
+ *   gZenWorkspaces.getWorkspaces()              -> array       (ZenSpaceManager.mjs:670)
+ *   gZenWorkspaces.getWorkspaceFromId(uuid)                    (ZenSpaceManager.mjs:662)
+ *   gZenWorkspaces.moveTabToWorkspace(tab, uuid)               (ZenSpaceManager.mjs:1493)
+ *   gZenWorkspaces.workspaceElement(uuid)                      (ZenSpaceManager.mjs:337)
+ *   gZenFolders.createFolder(tabs, opts)        -> folder      (ZenFolders.mjs:623)
+ *   gZenFolders.setFolderUserIcon(folder, icon)                (ZenFolders.mjs:1087)
+ *   folder.label / folder.collapsed setters                    (ZenFolder.mjs)
+ *   folder.addTabs(tabs)                                       (ZenFolder.mjs:289)
+ *   folder.delete()                             -> Promise     (ZenFolder.mjs:174)
+ *   gZenPinnedTabManager.addToEssentials(tab|tabs)             (ZenPinnedTabManager.mjs:446)
+ *   gZenPinnedTabManager.removeEssentials(tab, unpin)          (ZenPinnedTabManager.mjs:503)
+ *   gBrowser.pinTab(tab) / gBrowser.unpinTab(tab)
+ */
+
+function getWin() {
+  return Services.wm.getMostRecentWindow("navigator:browser");
+}
+
+function findTabByUrl(win, url) {
+  if (!url || !win?.gBrowser) return null;
+  for (const tab of win.gBrowser.tabs) {
+    try {
+      const u = tab.linkedBrowser?.currentURI?.spec;
+      if (u === url) return tab;
+    } catch {}
+  }
+  return null;
+}
+
+function findFolderById(win, folderId) {
+  if (!folderId || !win) return null;
+  const el = win.document.getElementById(folderId);
+  if (el && el.tagName?.toLowerCase() === "zen-folder") return el;
+  return null;
+}
+
+async function safe(fn) {
+  try {
+    const result = await fn();
+    return result === undefined ? { success: true } : result;
+  } catch (e) {
+    return { success: false, error: e?.message || String(e) };
+  }
+}
+
 this.zenInternals = class extends ExtensionAPI {
   getAPI(context) {
     return {
       zenInternals: {
-        async createFolder(options) {
-          const win = Services.wm.getMostRecentWindow("navigator:browser");
-          if (!win || !win.gZenFolders) {
-            return { success: false, error: "Zen folders API not available" };
-          }
+        // --- Workspace CRUD ---
 
+        async createWorkspace({ name, icon }) {
+          return safe(async () => {
+            const win = getWin();
+            if (!win?.gZenWorkspaces) return { success: false, error: "gZenWorkspaces unavailable" };
+            const ws = await win.gZenWorkspaces.createAndSaveWorkspace(
+              name || "Space",
+              icon || undefined,
+              /* dontChange */ true,
+            );
+            if (!ws?.uuid) return { success: false, error: "createAndSaveWorkspace returned no uuid" };
+            return { success: true, uuid: ws.uuid, name: ws.name, icon: ws.icon };
+          });
+        },
+
+        async renameWorkspace({ uuid, name, icon }) {
+          return safe(async () => {
+            const win = getWin();
+            if (!win?.gZenWorkspaces) return { success: false, error: "gZenWorkspaces unavailable" };
+            const ws = win.gZenWorkspaces.getWorkspaceFromId(uuid);
+            if (!ws) return { success: false, error: `workspace not found: ${uuid}` };
+            const updated = { ...ws };
+            if (typeof name === "string") updated.name = name;
+            if (typeof icon === "string") updated.icon = icon;
+            win.gZenWorkspaces.saveWorkspace(updated);
+            return { success: true };
+          });
+        },
+
+        async deleteWorkspace({ uuid }) {
+          return safe(async () => {
+            const win = getWin();
+            if (!win?.gZenWorkspaces) return { success: false, error: "gZenWorkspaces unavailable" };
+            await win.gZenWorkspaces.removeWorkspace(uuid);
+            return { success: true };
+          });
+        },
+
+        async getWorkspaces() {
+          const win = getWin();
+          if (!win?.gZenWorkspaces) return [];
           try {
-            // Switch to target workspace if specified
-            if (options.workspaceName && win.gZenWorkspaces) {
-              const workspaces = await win.gZenWorkspaces.getWorkspaces();
-              const ws = (workspaces || []).find(w => w.name === options.workspaceName);
-              if (ws) {
-                await win.gZenWorkspaces.changeWorkspace(ws.uuid);
+            const ws = win.gZenWorkspaces.getWorkspaces() || [];
+            return ws.map(w => ({ uuid: w.uuid, name: w.name, icon: w.icon || "" }));
+          } catch {
+            return [];
+          }
+        },
+
+        // --- Tab placement ---
+
+        async moveTabToWorkspace({ tabUrl, workspaceUuid }) {
+          return safe(async () => {
+            const win = getWin();
+            if (!win?.gZenWorkspaces) return { success: false, error: "gZenWorkspaces unavailable" };
+            const tab = findTabByUrl(win, tabUrl);
+            if (!tab) return { success: false, error: `tab not found: ${tabUrl}` };
+            win.gZenWorkspaces.moveTabToWorkspace(tab, workspaceUuid);
+            return { success: true };
+          });
+        },
+
+        async setEssential({ tabUrl, essential }) {
+          return safe(async () => {
+            const win = getWin();
+            const mgr = win?.gZenPinnedTabManager;
+            if (!mgr) return { success: false, error: "gZenPinnedTabManager unavailable" };
+            const tab = findTabByUrl(win, tabUrl);
+            if (!tab) return { success: false, error: `tab not found: ${tabUrl}` };
+            if (essential) {
+              mgr.addToEssentials(tab);
+            } else {
+              mgr.removeEssentials(tab, /* unpin */ false);
+            }
+            return { success: true };
+          });
+        },
+
+        async setPinned({ tabUrl, pinned }) {
+          return safe(async () => {
+            const win = getWin();
+            if (!win?.gBrowser) return { success: false, error: "gBrowser unavailable" };
+            const tab = findTabByUrl(win, tabUrl);
+            if (!tab) return { success: false, error: `tab not found: ${tabUrl}` };
+            if (tab.hasAttribute("zen-essential")) {
+              return { success: true, skipped: "essential tab" };
+            }
+            if (pinned && !tab.pinned) win.gBrowser.pinTab(tab);
+            else if (!pinned && tab.pinned) win.gBrowser.unpinTab(tab);
+            return { success: true };
+          });
+        },
+
+        async removeTab({ tabUrl }) {
+          return safe(async () => {
+            const win = getWin();
+            if (!win?.gBrowser) return { success: false, error: "gBrowser unavailable" };
+            const tab = findTabByUrl(win, tabUrl);
+            if (!tab) return { success: true, skipped: "not found" };
+            win.gBrowser.removeTab(tab);
+            return { success: true };
+          });
+        },
+
+        // --- Folders ---
+
+        async createFolder({ id, name, collapsed, userIcon, workspaceUuid, parentId, tabUrls }) {
+          return safe(async () => {
+            const win = getWin();
+            if (!win?.gZenFolders) return { success: false, error: "gZenFolders unavailable" };
+
+            // Pre-existing folder with this id? -> just update properties.
+            const existing = id ? findFolderById(win, id) : null;
+            if (existing) {
+              if (typeof name === "string") existing.label = name;
+              if (typeof collapsed === "boolean") existing.collapsed = collapsed;
+              if (typeof userIcon === "string") win.gZenFolders.setFolderUserIcon(existing, userIcon);
+              return { success: true, id: existing.id, alreadyExisted: true };
+            }
+
+            const tabElements = [];
+            if (Array.isArray(tabUrls) && tabUrls.length > 0) {
+              const urlSet = new Set(tabUrls);
+              for (const tab of win.gBrowser.tabs) {
+                try {
+                  const u = tab.linkedBrowser?.currentURI?.spec;
+                  if (u && urlSet.has(u)) {
+                    tabElements.push(tab);
+                    urlSet.delete(u);
+                  }
+                } catch {}
               }
             }
 
-            // Find tab elements by URL (gBrowser.tabs has ALL workspace tabs)
-            let tabElements = [];
-            if (options.tabUrls && options.tabUrls.length > 0) {
-              const urlSet = new Set(options.tabUrls);
-              for (const tab of win.gBrowser.tabs) {
+            const opts = {
+              label: name || "Folder",
+              collapsed: !!collapsed,
+              workspaceId: workspaceUuid || (win.gZenWorkspaces?.activeWorkspace),
+            };
+            if (id) opts.id = id;
+
+            const folder = win.gZenFolders.createFolder(tabElements, opts);
+            if (!folder) return { success: false, error: "createFolder returned null" };
+
+            if (userIcon) {
+              try { win.gZenFolders.setFolderUserIcon(folder, userIcon); } catch {}
+            }
+
+            if (parentId) {
+              const parent = findFolderById(win, parentId);
+              if (parent?.groupContainer) {
                 try {
-                  const url = tab.linkedBrowser?.currentURI?.spec;
-                  if (url && urlSet.has(url)) {
-                    tabElements.push(tab);
-                    urlSet.delete(url);
-                  }
+                  parent.groupContainer.appendChild(folder);
                 } catch (e) {
-                  // Skip tabs that can't be inspected
+                  return { success: true, id: folder.id, parentWarning: e.message };
                 }
               }
             }
 
-            const folder = win.gZenFolders.createFolder(tabElements, {
-              name: options.name || "Folder",
-            });
-
-            if (folder && options.userIcon) {
-              folder.setAttribute("user-icon", options.userIcon);
-            }
-            if (folder && options.collapsed) {
-              folder.collapsed = true;
-            }
-
-            return { success: true, tabCount: tabElements.length };
-          } catch (e) {
-            return { success: false, error: e.message };
-          }
+            return { success: true, id: folder.id, tabCount: tabElements.length };
+          });
         },
 
-        async getFolders() {
-          const win = Services.wm.getMostRecentWindow("navigator:browser");
-          if (!win || !win.gZenFolders) return [];
-
-          try {
-            const folders = win.document.querySelectorAll("zen-folder");
-            const result = [];
-            for (const f of folders) {
-              result.push({
-                id: f.id,
-                name: f.label || "",
-                collapsed: f.collapsed || false,
-              });
-            }
-            return result;
-          } catch (e) {
-            return [];
-          }
+        async renameFolder({ folderId, name }) {
+          return safe(async () => {
+            const win = getWin();
+            const folder = findFolderById(win, folderId);
+            if (!folder) return { success: false, error: `folder not found: ${folderId}` };
+            folder.label = name;
+            return { success: true };
+          });
         },
 
-        async getWorkspaces() {
-          const win = Services.wm.getMostRecentWindow("navigator:browser");
-          if (!win || !win.gZenWorkspaces) return [];
+        async setFolderCollapsed({ folderId, collapsed }) {
+          return safe(async () => {
+            const win = getWin();
+            const folder = findFolderById(win, folderId);
+            if (!folder) return { success: false, error: `folder not found: ${folderId}` };
+            folder.collapsed = !!collapsed;
+            return { success: true };
+          });
+        },
 
-          try {
-            const workspaces = await win.gZenWorkspaces.getWorkspaces();
-            return (workspaces || []).map(w => ({
-              uuid: w.uuid,
-              name: w.name,
-              icon: w.icon || "",
-            }));
-          } catch (e) {
-            return [];
-          }
+        async setFolderUserIcon({ folderId, userIcon }) {
+          return safe(async () => {
+            const win = getWin();
+            const folder = findFolderById(win, folderId);
+            if (!folder) return { success: false, error: `folder not found: ${folderId}` };
+            if (win.gZenFolders?.setFolderUserIcon) {
+              win.gZenFolders.setFolderUserIcon(folder, userIcon || "");
+            }
+            return { success: true };
+          });
+        },
+
+        async setFolderParent({ folderId, parentId }) {
+          return safe(async () => {
+            const win = getWin();
+            const folder = findFolderById(win, folderId);
+            if (!folder) return { success: false, error: `folder not found: ${folderId}` };
+
+            if (!parentId) {
+              // Move to top level: re-anchor under the workspace's pinned tabs container.
+              const wsId = folder.getAttribute("zen-workspace-id");
+              const wsEl = wsId ? win.gZenWorkspaces?.workspaceElement?.(wsId) : null;
+              const target = wsEl?.pinnedTabsContainer || win.gZenWorkspaces?.pinnedTabsContainer;
+              if (target) target.appendChild(folder);
+              return { success: true };
+            }
+
+            const parent = findFolderById(win, parentId);
+            if (!parent?.groupContainer) return { success: false, error: `parent not found: ${parentId}` };
+            parent.groupContainer.appendChild(folder);
+            return { success: true };
+          });
+        },
+
+        async deleteFolder({ folderId }) {
+          return safe(async () => {
+            const win = getWin();
+            const folder = findFolderById(win, folderId);
+            if (!folder) return { success: true, skipped: "not found" };
+            await folder.delete();
+            return { success: true };
+          });
+        },
+
+        async addTabToFolder({ tabUrl, folderId }) {
+          return safe(async () => {
+            const win = getWin();
+            const folder = findFolderById(win, folderId);
+            if (!folder) return { success: false, error: `folder not found: ${folderId}` };
+            const tab = findTabByUrl(win, tabUrl);
+            if (!tab) return { success: false, error: `tab not found: ${tabUrl}` };
+            if (!tab.pinned && win.gBrowser?.pinTab) win.gBrowser.pinTab(tab);
+            folder.addTabs([tab]);
+            return { success: true };
+          });
+        },
+
+        async removeTabFromFolder({ tabUrl }) {
+          return safe(async () => {
+            const win = getWin();
+            const tab = findTabByUrl(win, tabUrl);
+            if (!tab) return { success: true, skipped: "not found" };
+            if (tab.group && win.gBrowser?.ungroupTab) {
+              win.gBrowser.ungroupTab(tab);
+            }
+            return { success: true };
+          });
         },
       },
     };

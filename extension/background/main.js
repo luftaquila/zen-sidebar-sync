@@ -9,6 +9,8 @@ import TabMonitor from './tab-monitor.js';
 import SyncClient from './sync-client.js';
 import TabApplier from './tab-applier.js';
 
+const SCHEMA_VERSION = 2;
+
 let tabMonitor;
 let syncClient;
 let tabApplier;
@@ -16,6 +18,7 @@ let syncEnabled = false;
 let syncStatus = 'disconnected';
 let lastSyncTime = null;
 let initialSyncDone = false;
+let schemaError = null;
 
 // --- Initialize ---
 
@@ -64,18 +67,22 @@ function onLocalStateChange(state, patch) {
 async function onRemoteStateUpdate(remoteState, sourceDevice) {
   if (sourceDevice === syncClient.deviceId) return;
 
+  if (!isCompatibleState(remoteState)) {
+    schemaError = `Server schema v${remoteState?.schemaVersion ?? '?'} ≠ extension v${SCHEMA_VERSION}. Reset server state.`;
+    console.error('[ZenSync]', schemaError);
+    browser.runtime.sendMessage({ type: 'status_update', status: 'schema_mismatch', schemaError }).catch(() => {});
+    return;
+  }
+  schemaError = null;
+
   if (!initialSyncDone) {
-    const totalRemoteTabs = (remoteState.essentials || []).length
-      + (remoteState.workspaces || []).reduce(
-        (sum, ws) => sum + (ws.tabs || []).length + (ws.pinnedTabs || []).length, 0);
+    const totalRemoteTabs = (remoteState.tabs || []).length;
 
     if (totalRemoteTabs === 0) {
-      // Server is empty — push local state as seed
       if (syncClient.isConnected && tabMonitor.state) {
         syncClient.sendFullState(tabMonitor.state);
       }
     } else {
-      // Server has state — additive merge only
       await tabApplier.applyState(remoteState, { addOnly: true });
     }
     initialSyncDone = true;
@@ -84,6 +91,10 @@ async function onRemoteStateUpdate(remoteState, sourceDevice) {
   }
 
   lastSyncTime = Date.now();
+}
+
+function isCompatibleState(state) {
+  return state && state.schemaVersion === SCHEMA_VERSION;
 }
 
 // --- Remote Patch (from Server, incremental) ---
@@ -123,6 +134,7 @@ async function handleMessage(msg, sender) {
       return {
         syncEnabled,
         syncStatus,
+        schemaError,
         lastSyncTime,
         state: tabMonitor?.state || null,
         deviceId: syncClient?.deviceId || null,

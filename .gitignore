@@ -3,3 +3,4 @@ sync-state.json
 tokens.json
 *.xpi
 web-ext-artifacts/
+__pycache__/

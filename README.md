@@ -28,22 +28,26 @@ Real-time sidebar sync for [Zen Browser](https://zen-browser.app). Syncs essenti
 
 | Item | Detection |
 |---|---|
-| Essentials (pinned global tabs) | `zenEssential` flag in session store |
-| Workspaces (all, including empty) | Workspace definitions in `zen-sessions.jsonlz4` |
+| Workspaces (spaces, including empty) | `spaces[]` in `zen-sessions.jsonlz4` |
+| Essentials (global pinned shortcuts) | `zenEssential` flag in session store |
 | Pinned tabs (per workspace) | `pinned` + `zenWorkspace` in session store |
 | Open tabs (per workspace) | `zenWorkspace` in session store |
-| Groups | `groups` in `zen-sessions.jsonlz4` |
-| Folders | `folders` in `zen-sessions.jsonlz4` + tab membership via `groupId` |
+| Folders (nested, with userIcon, collapsed state) | `folders[]` in `zen-sessions.jsonlz4` |
+| Tab → folder membership | `groupId` on tab → folder id |
+
+A tab is **one of** essential / pinned / normal — transitions between these states sync as a single update without tearing the tab down.
 
 ### Sync behavior
 
+- State is `schemaVersion: 2`. Server rejects mismatched payloads.
 - Initial connect merges additively (no tabs are closed).
 - After initial sync, all changes propagate bidirectionally — including tab closes.
-- If the remote state is empty (server reset/corruption), removal is skipped to prevent data loss.
+- Empty remote state forces additive merge (defends against accidental wipe).
 - Small diffs go as patches; large changes send full state.
-- Conflicts resolved by server-side timestamps (clients cannot back-date).
+- Conflicts resolved by `lastModified` per record (last write wins).
+- Workspace creation, folder creation/nesting/rename/delete, tab pin/unpin/essential/move propagate via the experiment API (Zen-internal calls `gZenWorkspaces`, `gZenFolders`, `gZenPinnedTabManager`).
+- Workspace whose name is UUID-shaped (`{xxxx-xxxx-…}`) is treated as corruption and dropped from sync.
 - Only `http:` and `https:` URLs are synced — `data:`, `javascript:`, `file:` are rejected.
-- Duplicate detection uses URLs from the native messaging host (all workspaces), not `browser.tabs.query` (active workspace only).
 
 ## Setup
 

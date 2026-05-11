@@ -11,9 +11,11 @@ const PORT = parseInt(process.env.PORT || '9223');
 const STATE_FILE = join(DATA_DIR, 'sync-state.json');
 const TOKEN_FILE = join(DATA_DIR, 'tokens.json');
 
-// [C1] Allowlisted properties for patch updates
-const TAB_PROPS = ['url', 'title', 'icon', 'position', 'pinned', 'lastModified'];
-const WS_PROPS = ['name', 'icon'];
+const SCHEMA_VERSION = 2;
+
+const TAB_PROPS = ['url', 'title', 'icon', 'kind', 'workspaceSyncId', 'folderSyncId', 'pinned', 'position', 'lastModified'];
+const FOLDER_PROPS = ['name', 'workspaceSyncId', 'parentSyncId', 'collapsed', 'userIcon', 'position', 'lastModified'];
+const WS_PROPS = ['name', 'icon', 'position', 'lastModified'];
 
 function pick(obj, keys) {
   const out = {};
@@ -21,17 +23,31 @@ function pick(obj, keys) {
   return out;
 }
 
-// --- State Management [H2] safe loading ---
+function emptyState() {
+  return {
+    schemaVersion: SCHEMA_VERSION,
+    workspaces: [],
+    folders: [],
+    tabs: [],
+    version: 0,
+    lastModified: Date.now(),
+  };
+}
 
 function loadState() {
   try {
     if (existsSync(STATE_FILE)) {
-      return JSON.parse(readFileSync(STATE_FILE, 'utf-8'));
+      const parsed = JSON.parse(readFileSync(STATE_FILE, 'utf-8'));
+      if (parsed.schemaVersion !== SCHEMA_VERSION) {
+        console.error(`State schema mismatch (got ${parsed.schemaVersion}, expected ${SCHEMA_VERSION}), resetting`);
+        return emptyState();
+      }
+      return parsed;
     }
   } catch (e) {
     console.error('Corrupt state file, resetting:', e.message);
   }
-  return { essentials: [], workspaces: [], groups: [], folders: [], version: 0, lastModified: Date.now() };
+  return emptyState();
 }
 
 function loadTokens() {
@@ -45,7 +61,6 @@ function loadTokens() {
   return {};
 }
 
-// [P5] Debounced async write with atomic rename
 let saveTimer = null;
 function scheduleSave() {
   if (saveTimer) return;
@@ -63,8 +78,6 @@ function scheduleSave() {
 
 let state = loadState();
 const tokens = loadTokens();
-
-// --- Token Management ---
 
 function generateToken() {
   return randomBytes(32).toString('hex');
@@ -88,12 +101,10 @@ function authenticateToken(token) {
   return tokens[hashToken(token)] !== undefined;
 }
 
-// --- WebSocket Server [C2] maxPayload ---
-
 const wss = new WebSocketServer({ port: PORT, maxPayload: 4 * 1024 * 1024 });
 const clients = new Map();
 
-console.log(`Zen Sidebar Sync server listening on ws://0.0.0.0:${PORT}`);
+console.log(`Zen Sidebar Sync server listening on ws://0.0.0.0:${PORT} (schema v${SCHEMA_VERSION})`);
 
 wss.on('connection', (ws) => {
   let authenticated = false;
@@ -122,6 +133,7 @@ wss.on('connection', (ws) => {
         ws.send(JSON.stringify({
           type: 'auth_ok',
           deviceId,
+          schemaVersion: SCHEMA_VERSION,
           state,
           connectedDevices: Array.from(clients.values()).map(c => c.name),
         }));
@@ -139,16 +151,14 @@ wss.on('connection', (ws) => {
       return;
     }
 
-    // [H3][H4] Validated message handling with try/catch
     try {
       switch (msg.type) {
         case 'full_state': {
-          if (!msg.state || !Array.isArray(msg.state.essentials) || !Array.isArray(msg.state.workspaces)) {
-            ws.send(JSON.stringify({ type: 'error', message: 'Invalid state structure' }));
+          if (!isValidV2State(msg.state)) {
+            ws.send(JSON.stringify({ type: 'error', message: `Invalid state structure (expected schemaVersion ${SCHEMA_VERSION})` }));
             break;
           }
-          const merged = mergeState(state, msg.state);
-          state = merged;
+          state = mergeState(state, msg.state);
           state.version++;
           state.lastModified = Date.now();
           scheduleSave();
@@ -210,7 +220,6 @@ wss.on('connection', (ws) => {
     clients.delete(ws);
   });
 
-  // [H1] Auth timeout with readyState guard
   setTimeout(() => {
     if (!authenticated && ws.readyState === 1) {
       ws.send(JSON.stringify({ type: 'error', message: 'Authentication timeout' }));
@@ -228,190 +237,118 @@ function broadcast(sender, msg) {
   }
 }
 
-// --- State Merge [H7] server-side timestamps, content-based ---
+function isValidV2State(s) {
+  return s
+    && s.schemaVersion === SCHEMA_VERSION
+    && Array.isArray(s.workspaces)
+    && Array.isArray(s.folders)
+    && Array.isArray(s.tabs);
+}
+
+function mergeBySyncId(serverItems, clientItems) {
+  const merged = new Map();
+  for (const item of (serverItems || [])) {
+    if (item?.syncId) merged.set(item.syncId, item);
+  }
+  for (const item of (clientItems || [])) {
+    if (!item?.syncId) continue;
+    const existing = merged.get(item.syncId);
+    if (!existing) {
+      merged.set(item.syncId, item);
+    } else if ((item.lastModified || 0) >= (existing.lastModified || 0)) {
+      merged.set(item.syncId, item);
+    }
+  }
+  return Array.from(merged.values());
+}
 
 function mergeState(server, client) {
   return {
-    essentials: mergeTabList(server.essentials, client.essentials),
-    workspaces: mergeWorkspaces(server.workspaces, client.workspaces),
-    groups: mergeBySyncId(server.groups, client.groups),
-    folders: mergeBySyncId(server.folders, client.folders),
+    schemaVersion: SCHEMA_VERSION,
+    workspaces: mergeBySyncId(server.workspaces, client.workspaces)
+      .sort((a, b) => (a.position ?? 0) - (b.position ?? 0)),
+    folders: mergeBySyncId(server.folders, client.folders)
+      .sort((a, b) => (a.position ?? 0) - (b.position ?? 0)),
+    tabs: mergeBySyncId(server.tabs, client.tabs)
+      .sort((a, b) => (a.position ?? 0) - (b.position ?? 0)),
     version: server.version,
     lastModified: Date.now(),
   };
 }
 
-function mergeBySyncId(serverItems, clientItems) {
-  if (!Array.isArray(clientItems)) return serverItems || [];
-  if (!serverItems || serverItems.length === 0) return clientItems;
-
-  const merged = new Map();
-  for (const item of serverItems) merged.set(item.syncId, item);
-  for (const item of clientItems) merged.set(item.syncId, { ...item, lastModified: Date.now() });
-  return Array.from(merged.values());
-}
-
-function mergeTabList(serverTabs, clientTabs) {
-  if (!Array.isArray(clientTabs)) return serverTabs || [];
-  if (!serverTabs || serverTabs.length === 0) {
-    return deduplicateByUrl(clientTabs.map(t => ({ ...t, lastModified: Date.now() })));
-  }
-
-  const merged = new Map();
-
-  for (const tab of serverTabs) {
-    merged.set(tab.syncId, tab);
-  }
-
-  for (const tab of clientTabs) {
-    const existing = merged.get(tab.syncId);
-    if (!existing) {
-      merged.set(tab.syncId, { ...tab, lastModified: Date.now() });
-    } else if (existing.url !== tab.url || existing.title !== tab.title) {
-      merged.set(tab.syncId, { ...tab, lastModified: Date.now() });
-    }
-  }
-
-  return deduplicateByUrl(Array.from(merged.values()))
-    .sort((a, b) => (a.position ?? 0) - (b.position ?? 0));
-}
-
-function deduplicateByUrl(tabs) {
-  const byUrl = new Map();
-  for (const tab of tabs) {
-    const existing = byUrl.get(tab.url);
-    if (!existing || (tab.lastModified || 0) > (existing.lastModified || 0)) {
-      byUrl.set(tab.url, tab);
-    }
-  }
-  return Array.from(byUrl.values());
-}
-
-function mergeWorkspaces(serverWs, clientWs) {
-  if (!Array.isArray(clientWs)) return serverWs || [];
-  if (!serverWs || serverWs.length === 0) {
-    return clientWs.map(w => ({ ...w, lastModified: Date.now() }));
-  }
-
-  const merged = new Map();
-
-  for (const ws of serverWs) {
-    merged.set(ws.syncId, ws);
-  }
-
-  for (const ws of clientWs) {
-    const existing = merged.get(ws.syncId);
-    if (!existing) {
-      merged.set(ws.syncId, { ...ws, lastModified: Date.now() });
-    } else {
-      const metaChanged = existing.name !== ws.name || existing.icon !== ws.icon;
-      merged.set(ws.syncId, {
-        ...existing,
-        ...(metaChanged ? { name: ws.name, icon: ws.icon } : {}),
-        syncId: ws.syncId,
-        tabs: mergeTabList(existing.tabs, ws.tabs),
-        pinnedTabs: mergeTabList(existing.pinnedTabs, ws.pinnedTabs),
-        lastModified: Date.now(),
-      });
-    }
-  }
-
-  // Deduplicate workspaces by name (different syncIds can map to same workspace)
-  const byName = new Map();
-  for (const ws of merged.values()) {
-    const existing = byName.get(ws.name);
-    if (!existing) {
-      byName.set(ws.name, ws);
-    } else {
-      existing.tabs = mergeTabList(existing.tabs || [], ws.tabs || []);
-      existing.pinnedTabs = mergeTabList(existing.pinnedTabs || [], ws.pinnedTabs || []);
-    }
-  }
-
-  return Array.from(byName.values())
-    .sort((a, b) => (a.position ?? 0) - (b.position ?? 0));
-}
-
-// --- Patch Application [C1][P4] sanitized + map-based ---
-
 function applyPatch(state, patch) {
+  const now = Date.now();
   for (const op of patch.operations) {
     switch (op.type) {
-      case 'add_essential':
-        if (op.tab?.syncId
-            && !state.essentials.some(t => t.syncId === op.tab.syncId)
-            && !state.essentials.some(t => t.url === op.tab.url)) {
-          state.essentials.push(op.tab);
-          state.essentials.sort((a, b) => (a.position ?? 0) - (b.position ?? 0));
-        }
-        break;
-
-      case 'remove_essential':
-        state.essentials = state.essentials.filter(t => t.syncId !== op.syncId);
-        break;
-
-      case 'update_essential': {
-        const idx = state.essentials.findIndex(t => t.syncId === op.syncId);
-        if (idx >= 0 && op.changes) {
-          Object.assign(state.essentials[idx], pick(op.changes, TAB_PROPS));
-        }
-        break;
-      }
-
       case 'add_workspace':
         if (op.workspace?.syncId && !state.workspaces.some(w => w.syncId === op.workspace.syncId)) {
-          state.workspaces.push(op.workspace);
+          state.workspaces.push({ ...op.workspace, lastModified: now });
         }
         break;
 
-      case 'remove_workspace': {
-        const removed = state.workspaces.find(w => w.syncId === op.syncId);
-        if (removed) op.workspace = removed;
+      case 'remove_workspace':
         state.workspaces = state.workspaces.filter(w => w.syncId !== op.syncId);
+        // Cascade: drop folders + tabs anchored to this workspace
+        state.folders = state.folders.filter(f => f.workspaceSyncId !== op.syncId);
+        state.tabs = state.tabs.filter(t => t.workspaceSyncId !== op.syncId);
         break;
-      }
 
       case 'update_workspace': {
         const ws = state.workspaces.find(w => w.syncId === op.syncId);
         if (ws && op.changes) {
           Object.assign(ws, pick(op.changes, WS_PROPS));
+          ws.lastModified = now;
         }
         break;
       }
 
-      case 'add_tab': {
-        const ws = state.workspaces.find(w => w.syncId === op.workspaceSyncId);
-        if (ws && op.tab?.syncId) {
-          const list = op.pinned ? (ws.pinnedTabs ??= []) : (ws.tabs ??= []);
-          if (!list.some(t => t.syncId === op.tab.syncId)
-              && !list.some(t => t.url === op.tab.url)) {
-            list.push(op.tab);
-            list.sort((a, b) => (a.position ?? 0) - (b.position ?? 0));
+      case 'add_folder':
+        if (op.folder?.syncId && !state.folders.some(f => f.syncId === op.folder.syncId)) {
+          state.folders.push({ ...op.folder, lastModified: now });
+        }
+        break;
+
+      case 'remove_folder':
+        state.folders = state.folders.filter(f => f.syncId !== op.syncId);
+        // Tabs that referenced this folder become folder-less but stay pinned in their workspace
+        for (const t of state.tabs) {
+          if (t.folderSyncId === op.syncId) {
+            t.folderSyncId = null;
+            t.lastModified = now;
           }
         }
         break;
-      }
 
-      case 'remove_tab': {
-        const ws2 = state.workspaces.find(w => w.syncId === op.workspaceSyncId);
-        if (ws2) {
-          ws2.tabs = (ws2.tabs || []).filter(t => t.syncId !== op.syncId);
-          ws2.pinnedTabs = (ws2.pinnedTabs || []).filter(t => t.syncId !== op.syncId);
+      case 'update_folder': {
+        const f = state.folders.find(x => x.syncId === op.syncId);
+        if (f && op.changes) {
+          Object.assign(f, pick(op.changes, FOLDER_PROPS));
+          f.lastModified = now;
         }
         break;
       }
+
+      case 'add_tab':
+        if (op.tab?.syncId && !state.tabs.some(t => t.syncId === op.tab.syncId)) {
+          state.tabs.push({ ...op.tab, lastModified: now });
+        }
+        break;
+
+      case 'remove_tab':
+        state.tabs = state.tabs.filter(t => t.syncId !== op.syncId);
+        break;
 
       case 'update_tab': {
-        const ws3 = state.workspaces.find(w => w.syncId === op.workspaceSyncId);
-        if (ws3 && op.changes) {
-          const safe = pick(op.changes, TAB_PROPS);
-          for (const list of [ws3.tabs || [], ws3.pinnedTabs || []]) {
-            const t = list.find(t => t.syncId === op.syncId);
-            if (t) Object.assign(t, safe);
-          }
+        const t = state.tabs.find(x => x.syncId === op.syncId);
+        if (t && op.changes) {
+          Object.assign(t, pick(op.changes, TAB_PROPS));
+          t.lastModified = now;
         }
         break;
       }
     }
   }
+  state.workspaces.sort((a, b) => (a.position ?? 0) - (b.position ?? 0));
+  state.folders.sort((a, b) => (a.position ?? 0) - (b.position ?? 0));
+  state.tabs.sort((a, b) => (a.position ?? 0) - (b.position ?? 0));
 }

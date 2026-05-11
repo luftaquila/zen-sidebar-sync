@@ -178,7 +178,7 @@ def extract_tab_data(profile):
         try:
             session = read_mozlz4(recovery)
             for window in session.get('windows', []):
-                for tab in window.get('tabs', []):
+                for tab_idx, tab in enumerate(window.get('tabs', [])):
                     entries = tab.get('entries', [])
                     if not entries:
                         continue
@@ -198,6 +198,7 @@ def extract_tab_data(profile):
                         'zenEssential': bool(tab.get('zenEssential', False)),
                         'pinned': bool(tab.get('pinned', False)),
                         'groupId': tab.get('groupId'),
+                        'position': tab_idx,
                     })
         except Exception as e:
             result['_recoveryError'] = str(e)

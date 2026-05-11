@@ -19,7 +19,7 @@ Zen Browser sidebar sync extension + WebSocket sync server. Syncs essentials, wo
     - `install.sh` — Linux/macOS installer
     - `install.ps1` — Windows installer (PowerShell, registers in Windows Registry)
   - `experiments/zenInternals/` — WebExtension experiment API (chrome-context access)
-    - `api.js` — accesses `gZenFolders`, `gZenWorkspaces`, `gBrowser.tabs` for folder/workspace operations
+    - `api.js` — wraps `gZenWorkspaces`, `gZenFolders`, `gZenPinnedTabManager`, `gBrowser` for workspace/folder/tab CRUD and transitions. Verified call shapes documented inline.
     - `schema.json` — experiment API schema definition
     - Requires `extensions.experiments.enabled = true` in `about:config`
 - `server/` — Node.js WebSocket server (ESM, single file, `ws` library)
@@ -29,33 +29,59 @@ Zen Browser sidebar sync extension + WebSocket sync server. Syncs essentials, wo
 - `.github/workflows/extension.yml` — builds `.xpi` on push to `main` and uploads as workflow artifact
 - `compose.yml` — works with both `docker compose` and `podman-compose`
 
+## State schema (v2)
+
+Server and extension share `schemaVersion: 2`. The shape is a flat tab model:
+
+```
+{
+  schemaVersion: 2, version, lastModified,
+  workspaces: [{ syncId, name, icon, position, lastModified }],
+  folders:    [{ syncId, name, workspaceSyncId, parentSyncId, collapsed, userIcon, position, lastModified }],
+  tabs: [{
+    syncId, url, title, icon,
+    kind: 'essential' | 'pinned' | 'normal',
+    workspaceSyncId,                // null only when kind='essential' AND no home space
+    folderSyncId,                   // null when not in folder; valid only when kind='pinned'
+    pinned, position, lastModified,
+  }]
+}
+```
+
+SyncId rules (deterministic hashes):
+- workspace: `ws-<hash(name)>` — rename = remove+add cycle
+- folder:    `fld-<hash(workspaceSyncId + ":" + path)>` where path is the slash-separated folder name chain from root
+- tab:       `tab-<hash(url)>`
+
+The patch op set: `add/remove/update` × `workspace/folder/tab`. Every transition (essential↔pinned↔normal, workspace move, folder move, pin/unpin) is a single `update_tab` with the changed property in `changes`.
+
 ## Key design decisions
 
-- Initial connect merges additively (never closes local tabs on first sync).
-- After initial sync, all changes propagate bidirectionally including tab closes.
+- Initial connect merges additively (`addOnly=true`). After initial sync, all changes propagate bidirectionally including tab closes.
 - Empty remote state triggers addOnly mode to prevent accidental mass tab deletion.
-- **Native messaging host** reads Zen's internal session store files because `browser.tabs.query({})` in Zen 1.8b+ only returns active workspace tabs — hidden workspace tabs are invisible to WebExtension API. The host reads `recovery.jsonlz4` (per-tab zenWorkspace/zenEssential/groupId) and `zen-sessions.jsonlz4` (workspace definitions, groups, folders). Falls back to browser.sessions API if native host is unavailable (limited to active workspace only).
+- **Native messaging host** reads Zen's internal session store files because `browser.tabs.query({})` in Zen 1.8b+ only returns active workspace tabs. The host reads `recovery.jsonlz4` (per-tab zenWorkspace/zenEssential/pinned/groupId/position) and `zen-sessions.jsonlz4` (workspace definitions, groups, folders). Falls back to browser.sessions API if unavailable (active workspace only, no folders).
 - Native data is cached for 5 seconds to avoid spawning Python on every tab event.
-- All workspaces from `zen-sessions.jsonlz4` are pre-populated before tab assignment, so empty workspaces are included in sync state.
-- Tab deduplication in both `applyState` and `applyPatch` uses `tabMonitor.state` (native host data, all workspaces) instead of `browser.tabs.query` (active workspace only). Using browser API for dedup causes duplicate tab creation for hidden workspace tabs.
-- Tab creation sets `zen-essential` and `zen-workspace-id` session values so Zen recognizes essential/workspace membership.
-- Workspace syncIds are name-based (not Zen UUID) for cross-device consistency.
-- Folder data includes `tabUrls` array mapping folder → member tab URLs via `groupId`.
+- **UUID-shaped workspace names are dropped on capture** (regex guard in `tab-monitor.js`). Tabs anchored to such workspaces are skipped to prevent ghost-workspace propagation.
+- All Zen-internal mutations (createWorkspace, moveTab, createFolder, addTabToFolder, setFolderParent, setEssential, …) flow through the experiment API in `experiments/zenInternals/api.js`. Each function is best-effort and returns `{success, error?}`; failures are logged but never abort the apply.
+- TabMonitor maintains three local↔sync identity maps: `workspaceUuidBySyncId` (workspace name → Zen UUID), `folderLocalIdBySyncId` (folder syncId → DOM id), `folderSyncIdByLocalId` (reverse). These are rebuilt every capture and used by the applier to find local resources.
+- Apply order on full state: workspaces → tabs → folders (topologically sorted by `parentSyncId`) → tab→folder membership → removal pass.
+- Apply order on patch: ops sorted by `opPriority` (workspace add → folder add → tab add → tab update → tab remove → folder remove → workspace remove).
+- Workspace syncIds are name-based (not Zen UUID) for cross-device consistency. Folder syncIds incorporate the full path so nested folders with the same name don't collide.
+- Server merges by syncId; conflicts resolve by `lastModified` (last write wins per record). The `remove_workspace` op cascades to drop folders/tabs anchored to it; `remove_folder` orphans tabs to top-level pinned (folderSyncId becomes null).
 - After every apply (state or patch), `captureFullState({ silent: true })` immediately recaptures browser state to prevent stale diffs triggering echo loops.
 - `_applyingCount` counter guards against tab events during apply; recapture runs while guard is still held.
 - Debounce of 300ms on tab events before state capture.
-- Server uses server-side timestamps for merge — client timestamps are ignored to prevent stale overwrites on reconnect.
-- Patch property updates are allowlisted (url, title, icon, position, pinned) to prevent state corruption.
+- Patch property updates are allowlisted (TAB_PROPS, FOLDER_PROPS, WS_PROPS) to prevent state corruption.
 - Only http/https URLs are captured and synced.
-- SyncIds are URL-based hashes (no timestamp) for stability across extension restarts and cross-device consistency.
 - Server writes are debounced (1s) and atomic (write-tmp + rename).
 - When docs (README.md, CLAUDE.md) describe behavior affected by a code change, always update them together.
 
 ## Known limitations
 
-- **Folder restoration disabled**: The experiment API's `createFolder` and `getFolders` use DOM selectors (`zen-folder`, `f.label`) that have not been verified against actual Zen Browser DOM. Folder data is captured and synced, but restoration on receiving devices is disabled until the DOM selectors are tested in a real browser.
-- **Hidden workspace tab removal**: `applyState` step 4 (remove tabs not in remote state) only removes active workspace tabs because `browser.tabs.query` doesn't return hidden ones. Tabs removed from remote state in hidden workspaces become zombies until that workspace is activated.
-- **Fallback mode limitations**: Without the native messaging host, only active workspace tabs are visible. Workspace detection falls back to `browser.sessions` API which may return UUIDs instead of names.
+- **Schema-version mismatch surfaces as `schema_mismatch` status**; reset server state with the command below before re-syncing.
+- **Hidden workspace tab removal via browser API**: Removal pass uses experiment API `removeTab({tabUrl})` which iterates `gBrowser.tabs` (all workspaces). Folder deletion likewise uses `gZenFolders` DOM. Both work cross-workspace.
+- **Fallback mode (no native host)**: Only active workspace tabs are visible; folders are not captured (empty `folders` array sent to server). Re-installing the native host restores full visibility.
+- **Workspace rename = remove+add cycle**: changing a workspace name regenerates its syncId and all dependent folder syncIds. Server-side cascade drops the old workspace's data; the new name's records replace it. Keep renames rare.
 
 ## Commands
 
@@ -75,8 +101,8 @@ cd extension/native && ./install.sh
 # Windows (PowerShell):
 cd extension\native; powershell -ExecutionPolicy Bypass -File install.ps1
 
-# reset server sync state
-podman exec zen-sync sh -c 'echo "{\"essentials\":[],\"workspaces\":[],\"groups\":[],\"folders\":[],\"version\":0,\"lastModified\":0}" > /data/sync-state.json'
+# reset server sync state (schema v2)
+podman exec zen-sync sh -c 'echo "{\"schemaVersion\":2,\"workspaces\":[],\"folders\":[],\"tabs\":[],\"version\":0,\"lastModified\":0}" > /data/sync-state.json'
 ```
 
 ## Conventions
