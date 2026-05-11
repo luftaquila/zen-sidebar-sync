@@ -128,11 +128,20 @@ class TabApplier {
       }
 
       // 2. Tabs — create missing, reconcile properties on mismatched.
+      // Live-URL dedup: ask the experiment API for every URL currently open
+      // (any workspace, visible or hidden). The tab-monitor cache lags Zen
+      // session-store flushes by up to 15s, so localTabsByUrl alone misses
+      // hidden-workspace tabs that exist but weren't in the last capture
+      // — without this guard we'd create duplicates of them.
+      const liveUrlsArr = await browser.zenInternals.listLiveUrls().catch(() => []);
+      const liveUrls = new Set(Array.isArray(liveUrlsArr) ? liveUrlsArr : []);
+
       for (const tab of (remoteState.tabs || [])) {
         if (!isAllowedUrl(tab.url)) continue;
         const localTab = localTabsByUrl.get(tab.url);
-        if (!localTab) {
+        if (!localTab && !liveUrls.has(tab.url)) {
           await this._createAndPlaceTab(tab);
+          liveUrls.add(tab.url);
         } else {
           await this._reconcileTab(tab, localTab);
         }
@@ -434,41 +443,45 @@ class TabApplier {
       console.warn('[TabApplier] tabs.create failed:', remoteTab.url, err?.message);
       return null;
     }
-    await this._reconcileTab(remoteTab, null);
+    // CRITICAL: pass tab.id through to _reconcileTab. The brand-new tab's
+    // linkedBrowser.currentURI is still about:blank for a moment, so the
+    // experiment API's URL-based lookup would miss it — moveTabToWorkspace,
+    // setEssential, etc. would all return "tab not found" and the tab would
+    // be left in the active workspace. tabId resolves directly via
+    // context.extension.tabManager and works immediately after create.
+    await this._reconcileTab(remoteTab, null, tab.id);
     return tab;
   }
 
-  async _reconcileTab(remoteTab, localTab) {
+  async _reconcileTab(remoteTab, localTab, tabId = null) {
     const url = remoteTab.url;
     const wsUuid = remoteTab.workspaceSyncId
       ? this.tabMonitor.workspaceUuidBySyncId.get(remoteTab.workspaceSyncId)
       : null;
+    const tabRef = { tabId, tabUrl: url }; // shared identifier passed to every zen call
 
     if (remoteTab.kind === 'essential') {
-      if (!localTab || localTab.kind !== 'essential') {
-        await browser.zenInternals.setEssential({ tabUrl: url, essential: true });
-      }
+      await browser.zenInternals.setEssential({ ...tabRef, essential: true });
     } else {
-      if (localTab && localTab.kind === 'essential') {
-        await browser.zenInternals.setEssential({ tabUrl: url, essential: false });
+      // ALWAYS clear essential first — Zen's moveTabsToWorkspace silently
+      // skips any tab with the zen-essential attribute. If we only call this
+      // when localTab.kind was 'essential', stale local state (or just a
+      // freshly-created tab whose attributes haven't been queried) will
+      // leave the tab stuck. setEssential(false) is idempotent at the
+      // experiment API layer — no-ops for tabs that aren't essential.
+      await browser.zenInternals.setEssential({ ...tabRef, essential: false });
+      if (wsUuid) {
+        await browser.zenInternals.moveTabToWorkspace({ ...tabRef, workspaceUuid: wsUuid });
       }
-      if (wsUuid && (!localTab || localTab.workspaceSyncId !== remoteTab.workspaceSyncId)) {
-        await browser.zenInternals.moveTabToWorkspace({ tabUrl: url, workspaceUuid: wsUuid });
-      }
-      const wantPinned = remoteTab.kind === 'pinned';
-      if (!localTab || localTab.pinned !== wantPinned) {
-        await browser.zenInternals.setPinned({ tabUrl: url, pinned: wantPinned });
-      }
+      await browser.zenInternals.setPinned({ ...tabRef, pinned: remoteTab.kind === 'pinned' });
     }
 
     // Folder membership (only meaningful for pinned tabs)
     if (remoteTab.kind === 'pinned' && remoteTab.folderSyncId) {
-      if (!localTab || localTab.folderSyncId !== remoteTab.folderSyncId) {
-        const folderId = this.tabMonitor.folderLocalIdBySyncId.get(remoteTab.folderSyncId);
-        if (folderId) await browser.zenInternals.addTabToFolder({ tabUrl: url, folderId });
-      }
+      const folderId = this.tabMonitor.folderLocalIdBySyncId.get(remoteTab.folderSyncId);
+      if (folderId) await browser.zenInternals.addTabToFolder({ ...tabRef, folderId });
     } else if (localTab?.folderSyncId && !remoteTab.folderSyncId) {
-      await browser.zenInternals.removeTabFromFolder({ tabUrl: url });
+      await browser.zenInternals.removeTabFromFolder({ ...tabRef });
     }
   }
 }

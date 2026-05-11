@@ -39,6 +39,37 @@ function findTabByUrl(win, url) {
   return null;
 }
 
+// Resolve a WebExtension tab id to the XUL <tab> element. This is the only
+// reliable path for tabs that were just created via browser.tabs.create —
+// their currentURI is still about:blank for a moment after create, so
+// findTabByUrl misses them.
+function findTabByExtId(context, tabId) {
+  if (tabId == null) return null;
+  try {
+    return context.extension?.tabManager?.get(tabId)?.nativeTab || null;
+  } catch {
+    return null;
+  }
+}
+
+function resolveTab(context, win, tabId, tabUrl) {
+  const byId = findTabByExtId(context, tabId);
+  if (byId) return byId;
+  return findTabByUrl(win, tabUrl);
+}
+
+function listLiveUrls(win) {
+  const out = new Set();
+  if (!win?.gBrowser) return out;
+  for (const tab of win.gBrowser.tabs) {
+    try {
+      const u = tab.linkedBrowser?.currentURI?.spec;
+      if (u) out.add(u);
+    } catch {}
+  }
+  return out;
+}
+
 function findFolderById(win, folderId) {
   if (!folderId || !win) return null;
   const el = win.document.getElementById(folderId);
@@ -109,41 +140,59 @@ this.zenInternals = class extends ExtensionAPI {
           }
         },
 
-        // --- Tab placement ---
+        // --- Live state query ---
 
-        async moveTabToWorkspace({ tabUrl, workspaceUuid }) {
+        // Returns the set of URLs currently open in any tab (any workspace,
+        // visible or hidden). Used by the applier to dedup against live state
+        // when the tab-monitor cache hasn't refreshed yet.
+        async listLiveUrls() {
+          const win = getWin();
+          return Array.from(listLiveUrls(win));
+        },
+
+        // --- Tab placement ---
+        // All tab ops accept `tabId` (preferred — direct WebExtension tab id
+        // mapping) or fall back to `tabUrl`. Newly-created tabs MUST use tabId
+        // because their `currentURI` is still about:blank for a moment after
+        // browser.tabs.create — URL lookup would miss them entirely, causing
+        // the tab to be left in the active workspace instead of being placed.
+
+        async moveTabToWorkspace({ tabId, tabUrl, workspaceUuid }) {
           return safe(async () => {
             const win = getWin();
             if (!win?.gZenWorkspaces) return { success: false, error: "gZenWorkspaces unavailable" };
-            const tab = findTabByUrl(win, tabUrl);
-            if (!tab) return { success: false, error: `tab not found: ${tabUrl}` };
+            const tab = resolveTab(context, win, tabId, tabUrl);
+            if (!tab) return { success: false, error: `tab not found: ${tabUrl || tabId}` };
+            // Zen's moveTabsToWorkspace silently skips tabs with zen-essential
+            // attribute. Caller is responsible for clearing essential first.
             win.gZenWorkspaces.moveTabToWorkspace(tab, workspaceUuid);
             return { success: true };
           });
         },
 
-        async setEssential({ tabUrl, essential }) {
+        async setEssential({ tabId, tabUrl, essential }) {
           return safe(async () => {
             const win = getWin();
             const mgr = win?.gZenPinnedTabManager;
             if (!mgr) return { success: false, error: "gZenPinnedTabManager unavailable" };
-            const tab = findTabByUrl(win, tabUrl);
-            if (!tab) return { success: false, error: `tab not found: ${tabUrl}` };
-            if (essential) {
+            const tab = resolveTab(context, win, tabId, tabUrl);
+            if (!tab) return { success: false, error: `tab not found: ${tabUrl || tabId}` };
+            const isEssential = tab.hasAttribute("zen-essential");
+            if (essential && !isEssential) {
               mgr.addToEssentials(tab);
-            } else {
+            } else if (!essential && isEssential) {
               mgr.removeEssentials(tab, /* unpin */ false);
             }
             return { success: true };
           });
         },
 
-        async setPinned({ tabUrl, pinned }) {
+        async setPinned({ tabId, tabUrl, pinned }) {
           return safe(async () => {
             const win = getWin();
             if (!win?.gBrowser) return { success: false, error: "gBrowser unavailable" };
-            const tab = findTabByUrl(win, tabUrl);
-            if (!tab) return { success: false, error: `tab not found: ${tabUrl}` };
+            const tab = resolveTab(context, win, tabId, tabUrl);
+            if (!tab) return { success: false, error: `tab not found: ${tabUrl || tabId}` };
             if (tab.hasAttribute("zen-essential")) {
               return { success: true, skipped: "essential tab" };
             }
@@ -153,11 +202,11 @@ this.zenInternals = class extends ExtensionAPI {
           });
         },
 
-        async removeTab({ tabUrl }) {
+        async removeTab({ tabId, tabUrl }) {
           return safe(async () => {
             const win = getWin();
             if (!win?.gBrowser) return { success: false, error: "gBrowser unavailable" };
-            const tab = findTabByUrl(win, tabUrl);
+            const tab = resolveTab(context, win, tabId, tabUrl);
             if (!tab) return { success: true, skipped: "not found" };
             win.gBrowser.removeTab(tab);
             return { success: true };
@@ -287,23 +336,23 @@ this.zenInternals = class extends ExtensionAPI {
           });
         },
 
-        async addTabToFolder({ tabUrl, folderId }) {
+        async addTabToFolder({ tabId, tabUrl, folderId }) {
           return safe(async () => {
             const win = getWin();
             const folder = findFolderById(win, folderId);
             if (!folder) return { success: false, error: `folder not found: ${folderId}` };
-            const tab = findTabByUrl(win, tabUrl);
-            if (!tab) return { success: false, error: `tab not found: ${tabUrl}` };
+            const tab = resolveTab(context, win, tabId, tabUrl);
+            if (!tab) return { success: false, error: `tab not found: ${tabUrl || tabId}` };
             if (!tab.pinned && win.gBrowser?.pinTab) win.gBrowser.pinTab(tab);
             folder.addTabs([tab]);
             return { success: true };
           });
         },
 
-        async removeTabFromFolder({ tabUrl }) {
+        async removeTabFromFolder({ tabId, tabUrl }) {
           return safe(async () => {
             const win = getWin();
-            const tab = findTabByUrl(win, tabUrl);
+            const tab = resolveTab(context, win, tabId, tabUrl);
             if (!tab) return { success: true, skipped: "not found" };
             if (tab.group && win.gBrowser?.ungroupTab) {
               win.gBrowser.ungroupTab(tab);

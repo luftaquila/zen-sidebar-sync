@@ -55,6 +55,12 @@
         "parameters": []
       },
       {
+        "name": "listLiveUrls",
+        "type": "function",
+        "async": true,
+        "parameters": []
+      },
+      {
         "name": "moveTabToWorkspace",
         "type": "function",
         "async": true,
@@ -63,7 +69,8 @@
             "name": "options",
             "type": "object",
             "properties": {
-              "tabUrl": { "type": "string" },
+              "tabId": { "type": "integer", "optional": true },
+              "tabUrl": { "type": "string", "optional": true },
               "workspaceUuid": { "type": "string" }
             }
           }
@@ -78,7 +85,8 @@
             "name": "options",
             "type": "object",
             "properties": {
-              "tabUrl": { "type": "string" },
+              "tabId": { "type": "integer", "optional": true },
+              "tabUrl": { "type": "string", "optional": true },
               "essential": { "type": "boolean" }
             }
           }
@@ -93,7 +101,8 @@
             "name": "options",
             "type": "object",
             "properties": {
-              "tabUrl": { "type": "string" },
+              "tabId": { "type": "integer", "optional": true },
+              "tabUrl": { "type": "string", "optional": true },
               "pinned": { "type": "boolean" }
             }
           }
@@ -216,7 +225,8 @@
             "name": "options",
             "type": "object",
             "properties": {
-              "tabUrl": { "type": "string" },
+              "tabId": { "type": "integer", "optional": true },
+              "tabUrl": { "type": "string", "optional": true },
               "folderId": { "type": "string" }
             }
           }
