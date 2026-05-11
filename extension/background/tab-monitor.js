@@ -294,12 +294,20 @@ class TabMonitor {
 
     let fldPos = 0;
     const folderSyncIdByLocal = this.folderSyncIdByLocalId;
+    // Dedup: two folders sharing the same workspace + path-name produce
+    // identical syncIds; only the first one wins to keep the diff stable
+    // (otherwise both folders try to claim the same syncId every capture
+    // and position bucketing oscillates, generating echo update_folder
+    // ops every cycle).
+    const seenSyncIds = new Set();
     for (const f of rawFolders) {
       const ws = wsBySrcUuid.get(f.workspaceId);
       if (!ws) continue;
       const path = folderPath(f.id);
       if (path.length === 0) continue;
       const syncId = makeSyncId('fld', `${ws.syncId}:${path.join('/')}`);
+      if (seenSyncIds.has(syncId)) continue;
+      seenSyncIds.add(syncId);
       const parentSyncId = f.parentId ? folderSyncIdByLocal.get(f.parentId) || null : null;
 
       folders.push({
