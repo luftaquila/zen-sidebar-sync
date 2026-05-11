@@ -12,6 +12,10 @@ let savedConfig = {};
 // --- Init ---
 
 async function init() {
+  try {
+    const v = browser.runtime.getManifest()?.version;
+    if (v) $('#extVersion').textContent = `v${v}`;
+  } catch {}
   const config = await browser.runtime.sendMessage({ type: 'get_config' });
   savedConfig = { serverUrl: config.serverUrl, syncToken: config.syncToken, deviceName: config.deviceName };
   if (config.serverUrl) $('#serverUrl').value = config.serverUrl;
@@ -127,13 +131,11 @@ function updateUI(status) {
   if (status.nativeMissing) renderBanner('native_missing', status);
   else if (status.schemaError) renderBanner('schema_mismatch', status);
 
-  if (status.syncEnabled && status.syncStatus === 'connected') {
-    infoSection.classList.remove('hidden');
-  } else {
-    infoSection.classList.add('hidden');
-  }
-
-  if (status.state) updateStats(status.state);
+  // Always show stats — they reflect the local tabMonitor capture and are
+  // meaningful regardless of sync state. Hide-on-disconnect made the popup
+  // look empty/broken when sync was off or reconnecting.
+  infoSection.classList.remove('hidden');
+  updateStats(status.state);
   if (status.lastSyncTime) {
     lastSyncTimestamp = status.lastSyncTime;
     updateLastSync(status.lastSyncTime);
@@ -159,14 +161,13 @@ function updateStatus(status, ctx = {}) {
   statusText.textContent = labels[status] || status;
   renderBanner(status, ctx);
 
-  if (status === 'connected') {
-    infoSection.classList.remove('hidden');
-    browser.runtime.sendMessage({ type: 'get_status' }).then(s => {
-      if (s?.state) updateStats(s.state);
-    });
-  } else if (status === 'auth_failed' || status === 'failed' || status === 'schema_mismatch' || status === 'native_missing') {
+  // Always refresh stats on status change.
+  browser.runtime.sendMessage({ type: 'get_status' }).then(s => {
+    if (s) updateStats(s.state);
+  });
+
+  if (status === 'auth_failed' || status === 'failed' || status === 'schema_mismatch' || status === 'native_missing') {
     syncToggle.checked = false;
-    infoSection.classList.add('hidden');
   }
 }
 
@@ -194,29 +195,19 @@ function renderBanner(status, ctx) {
 }
 
 function updateStats(state) {
-  if (!state) return;
-
-  // schema v2: flat tabs[] with kind, plus workspaces[] and folders[]
-  if (Array.isArray(state.tabs)) {
-    const tabs = state.tabs;
-    const essentials = tabs.filter(t => t.kind === 'essential').length;
-    const workspaces = (state.workspaces || []).length;
-    $('#essentialCount').textContent = essentials;
-    $('#workspaceCount').textContent = workspaces;
-    $('#tabCount').textContent = tabs.length;
+  if (!state || !Array.isArray(state.tabs)) {
+    $('#essentialCount').textContent = '-';
+    $('#workspaceCount').textContent = '-';
+    $('#tabCount').textContent = '-';
     return;
   }
-
-  // legacy v1 fallback (defensive — should never hit on v2 server)
-  const essentials = (state.essentials || []).length;
-  const workspaces = (state.workspaces || []).length;
-  let tabs = 0;
-  for (const ws of (state.workspaces || [])) {
-    tabs += (ws.tabs || []).length + (ws.pinnedTabs || []).length;
-  }
+  const tabs = state.tabs;
+  const essentials = tabs.filter(t => t.kind === 'essential').length;
+  // "Tabs" excludes essentials so the three numbers don't double-count.
+  const nonEssential = tabs.length - essentials;
   $('#essentialCount').textContent = essentials;
-  $('#workspaceCount').textContent = workspaces;
-  $('#tabCount').textContent = tabs;
+  $('#workspaceCount').textContent = (state.workspaces || []).length;
+  $('#tabCount').textContent = nonEssential;
 }
 
 function updateLastSync(timestamp) {

@@ -43,6 +43,37 @@ function ss() {
   return _SS;
 }
 
+// Robust URL extraction. Unloaded/lazy tabs (Zen's tab unload feature, or
+// freshly session-restored tabs that haven't been activated) have a
+// linkedBrowser whose currentURI reads "about:blank" even though their
+// session-stored URL is something else. If we relied on currentURI alone,
+// capture would skip those tabs and the diff would emit a flood of
+// remove_tab ops — exactly the cascade-delete bug we keep hitting.
+function getTabUrl(xulTab) {
+  try {
+    const cur = xulTab.linkedBrowser?.currentURI?.spec;
+    if (cur && cur !== "about:blank" && cur !== "") return cur;
+  } catch {}
+  try {
+    const utv = xulTab.linkedBrowser?.userTypedValue;
+    if (utv) return utv;
+  } catch {}
+  try {
+    const SS = ss();
+    if (SS) {
+      const raw = SS.getTabState(xulTab);
+      if (raw) {
+        const state = JSON.parse(raw);
+        const entries = state?.entries || [];
+        const idx = Math.max(0, Math.min((state?.index || entries.length) - 1, entries.length - 1));
+        const url = entries[idx]?.url;
+        if (url) return url;
+      }
+    }
+  } catch {}
+  return null;
+}
+
 function getTabSyncUuid(xulTab, { create = false } = {}) {
   const SS = ss();
   if (!SS) return null;
@@ -284,7 +315,7 @@ this.zenInternals = class extends ExtensionAPI {
           try {
             let pos = 0;
             for (const tab of win.gBrowser.tabs) {
-              const url = tab.linkedBrowser?.currentURI?.spec;
+              const url = getTabUrl(tab);
               if (!url || (!url.startsWith('http:') && !url.startsWith('https:'))) continue;
               const groupId = tab.group?.id || null;
               // Stable per-tab identity — generated and persisted on first
