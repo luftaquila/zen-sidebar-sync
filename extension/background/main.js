@@ -125,8 +125,14 @@ async function onRemoteStateUpdate(remoteState, sourceDevice, isAuthState = fals
       }
     }
   } else {
-    // Broadcast from another device or force_pull — full reconciliation.
-    await tabApplier.applyState(remoteState, { addOnly: false });
+    // Broadcast state_update from another device (a peer's full_state
+    // push or a request_state reply). Apply additively only — never
+    // remove local tabs based on a peer's snapshot. If A just closed
+    // a tab and B simultaneously sent a full_state still containing it,
+    // a full reconciliation would re-create the closed tab on A. Tab
+    // removals propagate via dedicated `patch` ops (remove_tab) which
+    // explicitly express the user's close intent.
+    await tabApplier.applyState(remoteState, { addOnly: true });
   }
 
   lastSyncTime = Date.now();
