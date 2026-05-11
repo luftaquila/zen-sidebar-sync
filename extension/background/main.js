@@ -99,8 +99,15 @@ async function onRemoteStateUpdate(remoteState, sourceDevice, isAuthState = fals
         syncClient.sendFullState(tabMonitor.state);
       }
     } else {
-      // Initial connect with server data — additive merge.
+      // Initial connect with server data — additive merge of remote
+      // INTO local, then push local back so any local-only workspaces,
+      // folders, or tabs that the server didn't yet know about propagate
+      // to peers. Without this push, anything created on a device while
+      // the server was tracking only a subset stays stuck locally.
       await tabApplier.applyState(remoteState, { addOnly: true });
+      if (syncClient.isConnected && tabMonitor.state) {
+        syncClient.sendFullState(tabMonitor.state);
+      }
     }
     initialSyncDone = true;
   } else if (isAuthState) {
