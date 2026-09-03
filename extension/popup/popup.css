@@ -361,3 +361,21 @@ header {
 .initial-sync-prompt .btn.primary:hover {
   background: #dc2626;
 }
+
+/* Invite field hint */
+.field-hint {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.4;
+  color: #6b7280;
+}
+
+.field-hint code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10px;
+  padding: 1px 4px;
+  border-radius: 3px;
+  background: #0f0f23;
+  border: 1px solid #2a2a4a;
+  color: #9ca3af;
+}

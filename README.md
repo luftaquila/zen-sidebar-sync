@@ -75,13 +75,24 @@ docker run -d --name zen-sync \
   ghcr.io/luftaquila/zen-sidebar-sync:latest
 ```
 
-First run prints a **sync token** to the container logs. Save it:
+Set your own token and public address in the environment — then the invite can always be reprinted and never has to be dug out of logs:
 
-```bash
-docker logs zen-sync    # or: podman logs zen-sync
+```yaml
+environment:
+  - SYNC_TOKEN=<a long random string you choose>
+  - PUBLIC_URL=wss://sync.example.com   # the address devices actually reach
 ```
 
-`PORT` env var overrides the default port. State and tokens are persisted in the `/data` volume.
+Print the one-paste invite at any time:
+
+```bash
+docker exec zen-sync node server.js --invite   # or: cd server && npm run invite
+# → zensync://sync.example.com/?t=<token>
+```
+
+If you don't set `SYNC_TOKEN`, a token is generated on first run and printed **once** (`tokens.json` stores only hashes, so it cannot be reprinted).
+
+`PORT` overrides the listen port. State and tokens live in the `/data` volume.
 
 #### From source
 
@@ -111,7 +122,16 @@ For development, use `about:debugging` > **Load Temporary Add-on** > select `ext
 
 #### 3. Configure and connect
 
-Click the toolbar icon > enter server URL (`ws://host:9223`) and the sync token > toggle **Sync** on. On first connect, pick a sync direction when prompted.
+Click the toolbar icon and paste the **invite** into the one field at the top — that's the whole setup. It fills in the server URL and token, names the device after the machine, and connects. On first connect, pick a sync direction when prompted.
+
+For every device after the first, you don't need the server at all: on an already-connected device press **Copy invite** and paste it on the next one. (The invite carries a bearer token — treat it like a password; don't paste it into chats or screenshots.)
+
+Manual entry is still available under **Advanced**, and for unattended setup the same string can be provisioned via `about:config` / `user.js`:
+
+```js
+user_pref("extensions.zenSidebarSync.invite", "zensync://sync.example.com/?t=<token>");
+user_pref("extensions.zenSidebarSync.enabled", true);
+```
 
 ## Compatibility
 

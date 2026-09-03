@@ -52,17 +52,31 @@
     <!-- Config -->
     <section id="configSection" class="section">
       <div class="field">
-        <label for="serverUrl">Server URL</label>
-        <input type="text" id="serverUrl" placeholder="ws://localhost:9223" spellcheck="false">
+        <label for="inviteInput">Invite</label>
+        <input type="password" id="inviteInput" placeholder="Paste invite (zensync://…)" spellcheck="false">
+        <p id="inviteHint" class="field-hint">
+          From the server log, <code>npm run invite</code>, or Copy invite on a connected device.
+        </p>
       </div>
-      <div class="field">
-        <label for="syncToken">Sync Token</label>
-        <input type="password" id="syncToken" placeholder="Paste your sync token" spellcheck="false">
+      <div class="actions">
+        <button id="copyInviteBtn" class="btn secondary">Copy invite</button>
       </div>
-      <div class="field">
-        <label for="deviceName">Device Name</label>
-        <input type="text" id="deviceName" placeholder="My MacBook" spellcheck="false">
-      </div>
+
+      <details class="admin-section" id="advancedConfig">
+        <summary>Advanced (manual fields)</summary>
+        <div class="field">
+          <label for="serverUrl">Server URL</label>
+          <input type="text" id="serverUrl" placeholder="wss://sync.example.com" spellcheck="false">
+        </div>
+        <div class="field">
+          <label for="syncToken">Sync Token</label>
+          <input type="password" id="syncToken" placeholder="Paste your sync token" spellcheck="false">
+        </div>
+        <div class="field">
+          <label for="deviceName">Device Name</label>
+          <input type="text" id="deviceName" placeholder="Auto (hostname)" spellcheck="false">
+        </div>
+      </details>
     </section>
 
     <!-- Initial sync confirmation prompt -->

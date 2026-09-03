@@ -10,6 +10,15 @@ const DATA_DIR = process.env.DATA_DIR || __dirname;
 const PORT = parseInt(process.env.PORT || '9223');
 const STATE_FILE = join(DATA_DIR, 'sync-state.json');
 const TOKEN_FILE = join(DATA_DIR, 'tokens.json');
+// Operator-owned token: set it in compose/env and the token never has to be
+// recovered from logs (tokens.json only ever stores hashes, so a generated
+// one is unrecoverable once lost).
+const SYNC_TOKEN = process.env.SYNC_TOKEN || '';
+// Public address clients actually reach, e.g. wss://sync.example.com behind
+// a reverse proxy. Without it the invite can only advertise the local port.
+const PUBLIC_URL = process.env.PUBLIC_URL || '';
+// Print the invite (and, for a generated token, the token itself) then exit.
+const INVITE_ONLY = process.argv.includes('--invite');
 
 // v3 record protocol. v2 shipped schemaVersion 3 on the wire, so 4 forces
 // old clients into the reset path.
@@ -189,14 +198,87 @@ function hashToken(token) {
   return createHash('sha256').update(token).digest('hex');
 }
 
-if (Object.keys(tokens).length === 0) {
-  const token = generateToken();
-  tokens[hashToken(token)] = { name: 'default', createdAt: Date.now() };
-  writeFileSync(TOKEN_FILE, JSON.stringify(tokens, null, 2));
-  console.log('='.repeat(60));
-  console.log('  Initial sync token (save this!):');
-  console.log(`  ${token}`);
-  console.log('='.repeat(60));
+function saveTokens() {
+  writeFileSync(TOKEN_FILE, JSON.stringify(tokens, null, 2), { mode: 0o600 });
+}
+
+function registerToken(token, name) {
+  const hash = hashToken(token);
+  if (!tokens[hash]) {
+    tokens[hash] = { name, createdAt: Date.now() };
+    saveTokens();
+  }
+  return hash;
+}
+
+/**
+ * Builds the one-paste invite a client can consume:
+ *   zensync://<host>[:<port>]/?t=<token>[&n=<device name hint>]
+ * The scheme is a container, not a transport — `wss:` is implied unless the
+ * public URL says otherwise (`s=0` marks a plaintext ws:// deployment).
+ */
+function buildInvite(token) {
+  let host;
+  let secure = true;
+  if (PUBLIC_URL) {
+    try {
+      const u = new URL(PUBLIC_URL);
+      secure = u.protocol === 'wss:' || u.protocol === 'https:';
+      host = u.host + (u.pathname && u.pathname !== '/' ? u.pathname.replace(/\/$/, '') : '');
+    } catch (e) {
+      console.warn(`Ignoring malformed PUBLIC_URL: ${PUBLIC_URL}`);
+    }
+  }
+  if (!host) {
+    host = `localhost:${PORT}`;
+    secure = false;
+  }
+  const params = new URLSearchParams({ t: token });
+  if (!secure) params.set('s', '0');
+  return `zensync://${host}/?${params.toString()}`;
+}
+
+function printInvite(token, { generated = false } = {}) {
+  const line = '='.repeat(64);
+  console.log(line);
+  if (token) {
+    console.log('  Paste this invite into the extension popup on each device:');
+    console.log(`  ${buildInvite(token)}`);
+    if (generated) {
+      console.log('');
+      console.log('  Save it now: this token was auto-generated and only tokens.json');
+      console.log('  (hashes only) is kept, so it can never be reprinted. Set');
+      console.log('  SYNC_TOKEN in the environment to own it and make it reprintable.');
+    }
+  } else {
+    console.log('  Token is set but not readable here (tokens.json stores hashes only).');
+    console.log('  Set SYNC_TOKEN in the environment so the invite can be printed,');
+    console.log('  or delete tokens.json to issue a new one.');
+  }
+  if (!PUBLIC_URL) {
+    console.log('');
+    console.log('  Tip: set PUBLIC_URL (e.g. wss://sync.example.com) so the invite');
+    console.log('  advertises the address your devices actually reach.');
+  }
+  console.log(line);
+}
+
+// Token bootstrap. SYNC_TOKEN (operator-owned) always wins and is registered
+// idempotently; otherwise a token is generated once, on an empty store.
+let bootstrapToken = '';
+let bootstrapGenerated = false;
+if (SYNC_TOKEN) {
+  registerToken(SYNC_TOKEN, 'env');
+  bootstrapToken = SYNC_TOKEN;
+} else if (Object.keys(tokens).length === 0) {
+  bootstrapToken = generateToken();
+  bootstrapGenerated = true;
+  registerToken(bootstrapToken, 'default');
+}
+
+if (INVITE_ONLY) {
+  printInvite(bootstrapToken, { generated: bootstrapGenerated });
+  process.exit(bootstrapToken ? 0 : 1);
 }
 
 function authenticateToken(token) {
@@ -284,6 +366,9 @@ const clients = new Map();
 
 console.log(`Zen Sidebar Sync server listening on ws://0.0.0.0:${PORT} (schema v${SCHEMA_VERSION})`);
 logState('startup');
+if (bootstrapToken) {
+  printInvite(bootstrapToken, { generated: bootstrapGenerated });
+}
 
 wss.on('connection', (ws) => {
   let authenticated = false;

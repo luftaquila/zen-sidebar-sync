@@ -194,8 +194,9 @@ function makeProfile(name, marionettePort, autoInitial) {
     ['xpinstall.signatures.required', false],
     ['extensions.experiments.enabled', true],
     ['services.sync.engine.spaces', false],
-    ['extensions.zenSidebarSync.serverUrl', `ws://127.0.0.1:${SYNC_PORT}`],
-    ['extensions.zenSidebarSync.token', TOKEN],
+    // Single-string invite (exercises the same path a user pastes into the
+    // popup); the serverUrl/token pair is the legacy fallback.
+    ['extensions.zenSidebarSync.invite', `zensync://127.0.0.1:${SYNC_PORT}/?t=${TOKEN}&s=0`],
     ['extensions.zenSidebarSync.deviceName', name],
     ['extensions.zenSidebarSync.enabled', true],
     ['extensions.zenSidebarSync.autoInitial', autoInitial],

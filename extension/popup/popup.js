@@ -1,3 +1,5 @@
+import { parseInvite, buildInvite } from '../common/invite.js';
+
 const $ = (sel) => document.querySelector(sel);
 
 const statusBadge = $('#statusBadge');
@@ -24,6 +26,11 @@ async function init() {
 
   const status = await browser.runtime.sendMessage({ type: 'get_status' });
   updateUI(status);
+
+  // Name the device after the machine so the invite is the only thing to fill.
+  if (!config.deviceName && status?.engineEnv?.hostName) {
+    $('#deviceName').value = status.engineEnv.hostName;
+  }
 
   if (status?.pendingInitialInfo) {
     renderInitialSyncPrompt(status.pendingInitialInfo);
@@ -52,6 +59,17 @@ async function init() {
   });
 
   syncToggle.addEventListener('change', onToggleChange);
+  $('#inviteInput').addEventListener('paste', (e) => {
+    // Apply on paste (the common path) without waiting for a blur.
+    const text = e.clipboardData?.getData('text');
+    if (text) {
+      e.preventDefault();
+      $('#inviteInput').value = text.trim();
+      applyInvite();
+    }
+  });
+  $('#inviteInput').addEventListener('change', applyInvite);
+  $('#copyInviteBtn').addEventListener('click', copyInvite);
   $('#forcePushBtn').addEventListener('click', forcePush);
   $('#forcePullBtn').addEventListener('click', forcePull);
   $('#confirmReplaceBtn').addEventListener('click', confirmInitialReplace);
@@ -166,6 +184,67 @@ async function rejectApplyGuard() {
   await browser.runtime.sendMessage({ type: 'reject_apply_guard' });
   $('#guardPrompt').classList.add('hidden');
   syncToggle.checked = false;
+}
+
+// --- Invite ---
+
+function setInviteHint(text, tone = 'muted') {
+  const hint = $('#inviteHint');
+  hint.textContent = text;
+  hint.style.color = tone === 'error' ? '#f87171' : tone === 'ok' ? '#4ade80' : '';
+}
+
+// Paste an invite → fills the manual fields, saves, and connects. This is
+// the whole setup flow for a new device.
+async function applyInvite() {
+  const input = $('#inviteInput');
+  const raw = input.value.trim();
+  if (!raw) return;
+
+  const parsed = parseInvite(raw);
+  if (!parsed) {
+    setInviteHint('Not a valid invite. Expected zensync://host/?t=…', 'error');
+    return;
+  }
+
+  $('#serverUrl').value = parsed.serverUrl;
+  $('#syncToken').value = parsed.token;
+  if (parsed.deviceName) $('#deviceName').value = parsed.deviceName;
+  const deviceName = $('#deviceName').value.trim();
+
+  savedConfig = { serverUrl: parsed.serverUrl, syncToken: parsed.token, deviceName };
+  // Clear the pasted secret from the visible field once it is stored.
+  input.value = '';
+  setInviteHint(`Connecting to ${parsed.serverUrl}…`, 'ok');
+
+  await browser.runtime.sendMessage({
+    type: 'connect',
+    serverUrl: parsed.serverUrl,
+    token: parsed.token,
+    deviceName,
+  });
+  syncToggle.checked = true;
+}
+
+async function copyInvite() {
+  const btn = $('#copyInviteBtn');
+  const config = await browser.runtime.sendMessage({ type: 'get_config' });
+  const invite = buildInvite({ serverUrl: config?.serverUrl, token: config?.syncToken });
+  if (!invite) {
+    btn.textContent = 'Nothing to copy';
+    setTimeout(() => { btn.textContent = 'Copy invite'; }, 1500);
+    return;
+  }
+  try {
+    await navigator.clipboard.writeText(invite);
+    btn.textContent = 'Copied — paste on the next device';
+  } catch {
+    // Clipboard can be unavailable; fall back to revealing it for manual copy.
+    $('#inviteInput').type = 'text';
+    $('#inviteInput').value = invite;
+    btn.textContent = 'Select and copy above';
+  }
+  setTimeout(() => { btn.textContent = 'Copy invite'; }, 2500);
 }
 
 // --- Actions ---

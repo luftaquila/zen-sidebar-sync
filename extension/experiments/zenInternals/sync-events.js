@@ -147,6 +147,7 @@ var ZenSyncEvents = new (class {
     return {
       spacesEngineEnabled,
       fxaConfigured,
+      hostName: this.#hostName(),
       zenVersion: Services.appinfo.version,
       compatible: probe.compatible,
       missing: probe.missing,
@@ -172,6 +173,7 @@ var ZenSyncEvents = new (class {
         if (v) provision[key] = v;
       } catch (e) {}
     };
+    read("invite", "extensions.zenSidebarSync.invite");
     read("serverUrl", "extensions.zenSidebarSync.serverUrl");
     read("token", "extensions.zenSidebarSync.token");
     read("deviceName", "extensions.zenSidebarSync.deviceName");
@@ -184,6 +186,27 @@ var ZenSyncEvents = new (class {
 
   setSpacesEnginePref(value) {
     Services.prefs.setBoolPref("services.sync.engine.spaces", !!value);
+  }
+
+  // Machine name, so a new device names itself instead of asking the user.
+  #hostName() {
+    try {
+      const env = Cc["@mozilla.org/process/environment;1"]?.getService(Ci.nsIEnvironment);
+      for (const key of ["HOSTNAME", "COMPUTERNAME", "HOST"]) {
+        const value = env?.get(key);
+        if (value) {
+          return value.replace(/\.local$/, "");
+        }
+      }
+    } catch (e) {}
+    try {
+      const sysInfo = Services.sysinfo;
+      const host = sysInfo.getProperty("host");
+      if (host) {
+        return String(host).replace(/\.local$/, "");
+      }
+    } catch (e) {}
+    return "";
   }
 
   /* Mark: lifecycle */

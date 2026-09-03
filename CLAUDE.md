@@ -12,7 +12,8 @@ v2 (name/URL-hash syncIds + Python native messaging host + per-op RPC applier) w
   - `background/` — thin policy + transport layer (ES modules via background page)
     - `main.js` — orchestrator: initial-sync direction prompt, spaces-engine conflict gate, apply-guard confirmation, admin actions, popup messaging
     - `sync-client.js` — WebSocket transport for the v3 record protocol (auth/reconnect/ping)
-  - `popup/` — settings UI (vanilla HTML/CSS/JS)
+  - `common/invite.js` — invite string parse/build, shared by popup and background
+  - `popup/` — settings UI (vanilla HTML/CSS/JS); invite paste + Copy invite, manual fields under "Advanced"
   - `experiments/zenInternals/` — the sync engine, chrome context (privileged)
     - `api.js` — ExtensionAPI glue: loads the three engine scripts into a shared scope, exposes functions + `onRecordsChanged`/`onEnvironmentChanged` events
     - `sync-model.js` — **port of Zen's `ZenSpacesSyncModel.sys.mjs` (MPL-2.0)**: projections from `ZenSessionStore.getSidebarData()`, canonical-JSON SHA-256 digests, uploaded-baseline store, container GUID map, pending navigation holds
@@ -78,7 +79,8 @@ Messages: `auth` → `auth_ok {generation, version, records}`; `put_records {rec
 - Server writes are debounced (1 s) and atomic (write-tmp + rename); tombstones carry `{seq, deletedAt}` only and are GC'd after 60 days (safe because reconnect reconciliation doesn't depend on them).
 - **Force-push CAS conflicts retry the push** (once, against the fresh version) — falling back to `request_state` would silently turn the user's push into a remote-wins pull. Initial-sync push conflicts instead refresh the direction prompt. `confirm_initial_replace` adopts the server generation only after the apply demonstrably ran; a wholesale failure (e.g. no synced window) keeps the prompt — flipping syncActive on with an empty baseline would upload exactly the local state the user chose to discard. After a successful replace, `request_state` refreshes once (broadcasts during the prompt were dropped).
 - **`browser.zenInternals.log(msg)`**: chrome-side `Services.console` channel for Marionette-driven log inspection (background `console.log` doesn't reach `Services.console`). The engine also emits low-frequency `[ZenSidebarSync]` diag lines there (diff sizes, guard holds, save failures).
-- **Headless provisioning** (`extensions.zenSidebarSync.*` prefs: `serverUrl`, `token`, `deviceName`, `enabled`, `autoInitial="push"|"replace"`): a fresh profile with no stored config adopts these at startup and can even answer the initial-sync direction prompt — used by the E2E harness and useful for multi-device setup via user.js.
+- **Connection setup is one pasted invite** (`extension/common/invite.js`, shared by popup and background): `zensync://<host>[/<path>]/?t=<token>[&n=<name>][&s=0]` — `wss:` implied, `s=0` marks a plaintext deployment, and the path survives so reverse-proxy subpaths work. The popup parses it into serverUrl/token/deviceName, stores it, clears the visible secret, and connects; **Copy invite** rebuilds the string from stored config so device N+1 never needs server access. Manual fields remain under "Advanced". Server side: `SYNC_TOKEN` (operator-owned, registered idempotently — makes the invite reprintable) and `PUBLIC_URL` (the address clients actually reach, since behind a proxy the container port is not it); `node server.js --invite` / `npm run invite` prints it. An auto-generated token is still printed once and cannot be reprinted (`tokens.json` holds hashes only, mode 0600) — the startup banner says so explicitly.
+- **Headless provisioning** (`extensions.zenSidebarSync.*` prefs: `invite` — or the legacy `serverUrl` + `token` pair — plus `deviceName`, `enabled`, `autoInitial="push"|"replace"`): a fresh profile with no stored config adopts these at startup and can even answer the initial-sync direction prompt — used by the E2E harness and useful for multi-device setup via user.js.
 - When docs (README.md, CLAUDE.md) describe behavior affected by a code change, always update them together.
 
 ## Known limitations
@@ -107,6 +109,7 @@ podman exec zen-sync sh -c 'rm /data/sync-state.json' && podman restart zen-sync
 # (or use the popup's Admin → Reset server state, which also force-disables all clients)
 
 # unit tests (no browser needed; server test needs server/node_modules installed)
+node test/invite.test.mjs            # invite string parse/build/round-trip (no browser, no server)
 node test/sync-model.test.mjs        # projection/digest/tombstone-invariant/hold/baseline tests (vm-shimmed chrome globals)
 node test/server-protocol.test.mjs   # spawns the server, drives the full v4 wire protocol incl. guards/CAS/cascade
 

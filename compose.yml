@@ -8,6 +8,14 @@ services:
       - /srv/zen-sidebar-sync:/data
     environment:
       - PORT=9223
+      # Own the token here so the invite is always reprintable
+      # (`docker exec zen-sync node server.js --invite`) instead of having to
+      # be recovered from first-run logs. Generate one with:
+      #   openssl rand -hex 32
+      # - SYNC_TOKEN=replace-me
+      # The address devices actually connect to, so the printed invite is
+      # correct behind a reverse proxy.
+      # - PUBLIC_URL=wss://sync.example.com
     restart: unless-stopped
     networks:
       - traefik

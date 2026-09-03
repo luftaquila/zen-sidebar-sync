@@ -8,6 +8,7 @@
  */
 
 import SyncClient from './sync-client.js';
+import { parseInvite } from '../common/invite.js';
 
 const SCHEMA_VERSION = 4;
 
@@ -75,6 +76,17 @@ async function init() {
   // Headless provisioning (about:config extensions.zenSidebarSync.*): a
   // fresh profile with no stored config adopts the pref-provided one.
   const provision = engineEnv?.provision || {};
+  // A single `invite` pref stands in for serverUrl + token.
+  if (provision.invite && !provision.serverUrl && !provision.token) {
+    const parsed = parseInvite(provision.invite);
+    if (parsed) {
+      provision.serverUrl = parsed.serverUrl;
+      provision.token = parsed.token;
+      provision.deviceName ||= parsed.deviceName || '';
+    } else {
+      console.warn('[ZenSync] Ignoring malformed extensions.zenSidebarSync.invite');
+    }
+  }
   if (!config.serverUrl && !config.syncToken && provision.serverUrl && provision.token) {
     config.serverUrl = provision.serverUrl;
     config.syncToken = provision.token;

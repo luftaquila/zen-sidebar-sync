@@ -6,7 +6,8 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "dev": "node --watch server.js"
+    "dev": "node --watch server.js",
+    "invite": "node server.js --invite"
   },
   "dependencies": {
     "ws": "^8.18.0"
