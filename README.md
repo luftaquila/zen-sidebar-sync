@@ -1,60 +1,56 @@
 # zen-sidebar-sync
 
-Real-time sidebar sync for [Zen Browser](https://zen-browser.app). Syncs essentials, workspaces, and open tabs across devices via WebSocket.
+Real-time sidebar sync for [Zen Browser](https://zen-browser.app). Syncs spaces, essentials, pinned tabs, folders, split views, and **regular open tabs** across devices via WebSocket — instantly, not on a polling schedule.
+
+> **Why this exists when Zen Twilight has built-in sync:** Zen's native Spaces sync (Firefox Sync based) deliberately excludes regular open tabs and propagates on Firefox Sync's pull schedule (~10 minutes typical). This project syncs everything — including open tabs — in real time over a self-hosted server. The two must not run simultaneously; the extension detects and disables Zen's native spaces engine (`services.sync.engine.spaces`).
 
 ## Architecture
 
 ```
-┌─────────────┐     WebSocket     ┌──────────────┐
-│  Zen + Ext  │◄─────────────────►│  Sync Server │
-└──────┬──────┘                   └──────┬───────┘
-       │                                 │
-  Native Host                            │
-  (Python)                               │
-       │                                 │
-┌──────┴──────┐     WebSocket            │
-│  Zen + Ext  │◄─────────────────────────┘
-└──────┬──────┘
-       │
-  Native Host
-  (Python)
+┌───────────────────────────────┐      WebSocket      ┌──────────────┐
+│ Zen + Extension               │◄───────────────────►│  Sync Server │
+│  ├ experiment (chrome ctx)    │                     └──────┬───────┘
+│  │   capture · diff · apply   │                            │
+│  └ background: WS transport   │      WebSocket             │
+├───────────────────────────────┤◄───────────────────────────┘
+│ Zen + Extension (device 2)    │
+└───────────────────────────────┘
 ```
 
-- **Extension** monitors tab state via native messaging host and communicates with the sync server.
-- **Native messaging host** reads Zen's internal session store files (`recovery.jsonlz4`, `zen-sessions.jsonlz4`) to detect all workspaces, essentials, and tabs — including hidden workspace tabs that the WebExtension API cannot access.
-- **Server** is a WebSocket server that merges and broadcasts state. Self-hostable.
+- **Experiment API (chrome context)** does all the sync work: captures Zen's in-memory session store (`ZenSessionStore.getSidebarData()`), diffs against a per-record digest baseline, and applies incoming records with Zen's own internal APIs. Ports of Zen's MPL-2.0 sync engine (`ZenSpacesSyncModel` / `ZenSpacesSyncApplier`) extended to cover regular tabs.
+- **Background script** is a thin policy + transport layer (WebSocket, initial-sync prompt, guards).
+- **Server** stores a flat record map with server-assigned sequence numbers and tombstones. Self-hostable, single file.
+
+No native messaging host, no Python — v1's session-file parsing is replaced by Zen's in-process store.
 
 ### What syncs
 
-| Item | Detection |
+| Item | Identity |
 |---|---|
-| Workspaces (spaces, including empty) | `spaces[]` in `zen-sessions.jsonlz4` |
-| Essentials (global pinned shortcuts) | `zenEssential` flag in session store |
-| Pinned tabs (per workspace) | `pinned` + `zenWorkspace` in session store |
-| Open tabs (per workspace) | `zenWorkspace` in session store |
-| Folders (nested, with userIcon, collapsed state) | `folders[]` in `zen-sessions.jsonlz4` |
-| Tab → folder membership | `groupId` on tab → folder id |
+| Spaces (name, icon, theme, container, order) | Zen space `uuid` (adopted verbatim across devices) |
+| Essentials (per-container, ordered) | tab `zenSyncId` (= persisted DOM id) |
+| Pinned tabs (pin target URL, static label/icon) | tab `zenSyncId` |
+| Regular open tabs (live URL) | tab `zenSyncId` |
+| Folders (nested, icon, order) | folder DOM id |
+| Split views | split `groupId` |
+| Containers (name/icon/color) | per-profile GUID map |
 
-A tab is **one of** essential / pinned / normal — transitions between these states sync as a single update without tearing the tab down.
+Record ids are Zen's own ids, adopted verbatim on receiving devices (`tab.id = remoteId`) — the same identity model Zen's native sync uses. After first sync, `document.getElementById(id)` resolves any record on any device.
 
 ### Sync behavior
 
-- State is `schemaVersion: 2`. Server rejects mismatched payloads.
-- Initial connect merges additively (no tabs are closed).
-- After initial sync, all changes propagate bidirectionally — including tab closes.
-- Empty remote state forces additive merge (defends against accidental wipe).
-- Small diffs go as patches; large changes send full state.
-- Conflicts resolved by `lastModified` per record (last write wins).
-- Workspace creation, folder creation/nesting/rename/delete, tab pin/unpin/essential/move propagate via the experiment API (Zen-internal calls `gZenWorkspaces`, `gZenFolders`, `gZenPinnedTabManager`).
-- Workspace whose name is UUID-shaped (`{xxxx-xxxx-…}`) is treated as corruption and dropped from sync.
-- Only `http:` and `https:` URLs are synced — `data:`, `javascript:`, `file:` are rejected.
+- Wire protocol `schemaVersion: 4`; the server assigns a monotonic `seq` per write (no client-clock conflict resolution).
+- Changes are captured event-driven (Zen's own chrome events + forced session collection, rate-limited) and uploaded as record diffs — typically < 2 s end-to-end.
+- Incoming records always apply (remote wins); if the local materialization diverges, the digest baseline re-uploads local truth on the next capture (self-healing, same model as Zen's native sync).
+- A **loaded tab is never navigated** by sync. Unloaded tabs are retargeted in session state; loaded ones hold the remote URL until they unload or the user navigates.
+- Pinned/essential tabs sync their **pin target**, not the live page (upstream semantics). Regular tabs sync the live URL.
+- Only `http:` / `https:` URLs sync, enforced on both client and server.
+- Deletions are emitted only for ids whose local object is confirmed absent — a transient capture gap can never mass-delete tabs on other devices.
+- First connect to an unknown server generation always **asks the user to pick a direction** (replace local / push local / cancel). Push is compare-and-swap guarded against racing devices.
+- Reconnects preserve offline work: offline-deleted tabs stay deleted, offline-opened tabs push, remote deletions apply.
+- Mass-deletion guards on capture (client), write (server), and apply (client, with user confirmation).
 
 ## Setup
-
-### Prerequisites
-
-- **Python 3.6+** — required for the native messaging host
-- **Zen Browser** — with access to `about:config`
 
 ### Server
 
@@ -73,7 +69,7 @@ docker compose up -d     # or: podman-compose up -d
 Or without compose:
 
 ```bash
-docker run -d --name zen-sync \     # or: podman run
+docker run -d --name zen-sync \
   -p 9223:9223 \
   -v zen-sync-data:/data \
   ghcr.io/luftaquila/zen-sidebar-sync:latest
@@ -104,7 +100,8 @@ Open `about:config` in Zen Browser and set:
 | Key | Value |
 |---|---|
 | `xpinstall.signatures.required` | `false` (allows unsigned extensions) |
-| `extensions.experiments.enabled` | `true` (enables experiment API for folder sync) |
+| `extensions.experiments.enabled` | `true` (enables the experiment API — required) |
+| `services.sync.engine.spaces` | `false` (disables Zen's native Spaces sync; the popup can do this for you) |
 
 #### 2. Install the extension
 
@@ -112,29 +109,13 @@ Download the latest `.xpi` artifact from [Actions](https://github.com/luftaquila
 
 For development, use `about:debugging` > **Load Temporary Add-on** > select `extension/manifest.json`.
 
-#### 3. Install the native messaging host
+#### 3. Configure and connect
 
-The native messaging host is required to read Zen's internal session store for full workspace/essential detection.
+Click the toolbar icon > enter server URL (`ws://host:9223`) and the sync token > toggle **Sync** on. On first connect, pick a sync direction when prompted.
 
-**Linux / macOS:**
+## Compatibility
 
-```bash
-cd extension/native
-./install.sh
-```
-
-**Windows (PowerShell):**
-
-```powershell
-cd extension\native
-powershell -ExecutionPolicy Bypass -File install.ps1
-```
-
-The installer copies the Python script and registers the native messaging manifest. The host runs on-demand (spawned per message, not a persistent daemon).
-
-#### 4. Configure and connect
-
-Click the toolbar icon > enter server URL (`ws://host:9223`) and the sync token > toggle **Sync** on.
+Requires a Zen build with persisted tab sync ids and the in-memory session store (Twilight 1.22+ / the 2026 `dev` branch internals). The extension probes every internal API it needs at startup and **fails closed** — if this Zen version is missing something, sync is disabled with an explanatory banner instead of corrupting state.
 
 ## Development
 
@@ -147,4 +128,4 @@ cd server && npm run dev
 
 ## License
 
-MIT
+MIT. Files ported from Zen Browser (`extension/experiments/zenInternals/sync-model.js`, `sync-applier.js`) remain under MPL-2.0 as noted in their headers.

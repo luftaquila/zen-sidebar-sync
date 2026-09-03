@@ -1,8 +1,8 @@
 {
   "manifest_version": 2,
   "name": "Zen Sidebar Sync",
-  "version": "1.14.2",
-  "description": "Real-time sidebar sync for Zen Browser — essentials, workspaces, and open tabs across devices",
+  "version": "2.0.0",
+  "description": "Real-time sidebar sync for Zen Browser — spaces, essentials, pinned tabs, folders, and open tabs across devices",
   "author": "luftaquila",
 
   "browser_specific_settings": {
@@ -13,10 +13,7 @@
   },
 
   "permissions": [
-    "tabs",
-    "sessions",
-    "storage",
-    "nativeMessaging"
+    "storage"
   ],
 
   "background": {

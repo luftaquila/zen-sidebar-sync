@@ -11,73 +11,69 @@ const PORT = parseInt(process.env.PORT || '9223');
 const STATE_FILE = join(DATA_DIR, 'sync-state.json');
 const TOKEN_FILE = join(DATA_DIR, 'tokens.json');
 
-const SCHEMA_VERSION = 3;
+// v3 record protocol. v2 shipped schemaVersion 3 on the wire, so 4 forces
+// old clients into the reset path.
+const SCHEMA_VERSION = 4;
 
-const TAB_PROPS = ['url', 'title', 'icon', 'kind', 'workspaceSyncId', 'folderSyncId', 'pinned', 'position', 'syncUuid', 'lastModified'];
-const FOLDER_PROPS = ['name', 'workspaceSyncId', 'parentSyncId', 'collapsed', 'userIcon', 'position', 'lastModified'];
-const WS_PROPS = ['name', 'icon', 'theme', 'position', 'lastModified'];
+const RECORD_KINDS = new Set(['container', 'space', 'tab', 'folder', 'split', 'layout']);
+const TOMBSTONE_TTL_MS = 60 * 24 * 60 * 60 * 1000; // 60 days
+const MAX_ID_LENGTH = 256;
+const MAX_TITLE_LENGTH = 1024;
+const MAX_ICON_LENGTH = 128 * 1024;
+const MAX_RECORD_BYTES = 512 * 1024;
 
-function pick(obj, keys) {
-  const out = {};
-  for (const k of keys) if (k in obj) out[k] = obj[k];
-  return out;
-}
+// --- Canonical digest (matches the client's sorted-key serialization) ---
 
-// --- Logging ---
-
-function logState(label) {
-  const w = (state.workspaces || []).length;
-  const f = (state.folders || []).length;
-  const t = (state.tabs || []);
-  const byKind = { essential: 0, pinned: 0, normal: 0 };
-  for (const x of t) byKind[x.kind] = (byKind[x.kind] || 0) + 1;
-  console.log(`[state] ${label} | v${state.version} | ws:${w} folders:${f} tabs:${t.length} (ess:${byKind.essential} pin:${byKind.pinned} norm:${byKind.normal})`);
-}
-
-function logPatchOp(op) {
-  const trunc = (s) => (s || '').toString().slice(0, 70);
-  switch (op.type) {
-    case 'add_tab':       return `add_tab ${op.tab?.kind} ${trunc(op.tab?.url)}`;
-    case 'update_tab':    return `update_tab ${trunc(op.tab?.url || op.syncId)} ${JSON.stringify(op.changes).slice(0, 80)}`;
-    case 'remove_tab':    return `remove_tab ${trunc(op.url || op.syncId)}`;
-    case 'add_workspace': return `add_workspace "${op.workspace?.name}"`;
-    case 'update_workspace': return `update_workspace ${op.syncId} ${JSON.stringify(op.changes).slice(0, 60)}`;
-    case 'remove_workspace': return `remove_workspace ${op.syncId}`;
-    case 'add_folder':    return `add_folder "${op.folder?.name}" ws=${op.folder?.workspaceSyncId}`;
-    case 'update_folder': return `update_folder ${op.syncId} ${JSON.stringify(op.changes).slice(0, 60)}`;
-    case 'remove_folder': return `remove_folder ${op.syncId}`;
-    default:              return op.type;
+function sortedClone(value) {
+  if (Array.isArray(value)) return value.map(sortedClone);
+  if (value && typeof value === 'object') {
+    const out = {};
+    for (const k of Object.keys(value).sort()) out[k] = sortedClone(value[k]);
+    return out;
   }
+  return value === undefined ? null : value;
 }
 
-// --- Safety guards ---
+function recordDigest(kind, data) {
+  return createHash('sha256').update(JSON.stringify(sortedClone({ kind, data }))).digest('base64');
+}
 
-function countRemovals(patch, st) {
-  let n = 0;
-  for (const op of patch.operations) {
-    if (op.type === 'remove_tab' || op.type === 'remove_folder' || op.type === 'remove_essential') {
-      n++;
-    } else if (op.type === 'remove_workspace') {
-      // Workspace removal cascades to its tabs + folders; count those too.
-      n++;
-      n += (st.tabs || []).filter(t => t.workspaceSyncId === op.syncId).length;
-      n += (st.folders || []).filter(f => f.workspaceSyncId === op.syncId).length;
+// --- Validation ---
+
+function isSyncableUrl(url) {
+  return typeof url === 'string' && (url.startsWith('http:') || url.startsWith('https:'));
+}
+
+function validateRecord(record) {
+  if (!record || typeof record !== 'object') return 'not an object';
+  if (typeof record.id !== 'string' || !record.id || record.id.length > MAX_ID_LENGTH) return 'bad id';
+  if (!RECORD_KINDS.has(record.kind)) return `unknown kind ${record.kind}`;
+  if (!record.data || typeof record.data !== 'object' || Array.isArray(record.data)) return 'bad data';
+  if (record.kind === 'tab') {
+    if (!isSyncableUrl(record.data.url)) return 'tab url must be http(s)';
+    if (typeof record.data.title === 'string' && record.data.title.length > MAX_TITLE_LENGTH) {
+      record.data.title = record.data.title.slice(0, MAX_TITLE_LENGTH);
     }
   }
-  return n;
+  // Icon fields on any kind (tab image, folder userIcon, space icon) are
+  // capped — one oversized data: blob would otherwise bloat every future
+  // auth_ok/state_records replay.
+  if (typeof record.data.icon === 'string' && record.data.icon.length > MAX_ICON_LENGTH) {
+    record.data.icon = '';
+  }
+  if (JSON.stringify(record.data).length > MAX_RECORD_BYTES) return 'record too large';
+  return null;
 }
 
-function countStateItems(st) {
-  return (st.workspaces || []).length + (st.folders || []).length + (st.tabs || []).length;
-}
+// --- State ---
 
 function emptyState() {
   return {
     schemaVersion: SCHEMA_VERSION,
-    workspaces: [],
-    folders: [],
-    tabs: [],
+    generation: randomBytes(8).toString('hex'),
     version: 0,
+    records: {},
+    tombstones: {},
     lastModified: Date.now(),
   };
 }
@@ -90,6 +86,8 @@ function loadState() {
         console.error(`State schema mismatch (got ${parsed.schemaVersion}, expected ${SCHEMA_VERSION}), resetting`);
         return emptyState();
       }
+      parsed.records ||= {};
+      parsed.tombstones ||= {};
       return parsed;
     }
   } catch (e) {
@@ -98,15 +96,19 @@ function loadState() {
   return emptyState();
 }
 
-function loadTokens() {
-  try {
-    if (existsSync(TOKEN_FILE)) {
-      return JSON.parse(readFileSync(TOKEN_FILE, 'utf-8'));
+function gcTombstones() {
+  const cutoff = Date.now() - TOMBSTONE_TTL_MS;
+  let dropped = 0;
+  for (const [id, t] of Object.entries(state.tombstones)) {
+    if ((t.deletedAt || 0) < cutoff) {
+      delete state.tombstones[id];
+      dropped++;
     }
-  } catch (e) {
-    console.error('Corrupt token file, resetting:', e.message);
   }
-  return {};
+  if (dropped) {
+    console.log(`[gc] dropped ${dropped} expired tombstones`);
+    scheduleSave();
+  }
 }
 
 let saveTimer = null;
@@ -125,6 +127,58 @@ function scheduleSave() {
 }
 
 let state = loadState();
+gcTombstones();
+setInterval(gcTombstones, 24 * 60 * 60 * 1000).unref();
+
+// --- Logging ---
+
+function countsByKind() {
+  const counts = {};
+  for (const rec of Object.values(state.records)) {
+    counts[rec.kind] = (counts[rec.kind] || 0) + 1;
+  }
+  return counts;
+}
+
+function logState(label) {
+  const c = countsByKind();
+  const tombs = Object.keys(state.tombstones).length;
+  console.log(
+    `[state] ${label} | v${state.version} gen=${state.generation} | ` +
+    `spaces:${c.space || 0} folders:${c.folder || 0} tabs:${c.tab || 0} ` +
+    `splits:${c.split || 0} containers:${c.container || 0} tombstones:${tombs}`
+  );
+}
+
+function describeRecord(record) {
+  const d = record.data || {};
+  switch (record.kind) {
+    case 'tab': {
+      const kind = d.essential ? 'essential' : d.pinned ? 'pinned' : 'normal';
+      return `tab(${kind}) ${(d.url || '').slice(0, 70)}`;
+    }
+    case 'space': return `space "${d.name}"`;
+    case 'folder': return `folder "${d.name}" ws=${d.workspaceUuid}`;
+    case 'split': return `split ${d.tabs?.length ?? 0} tabs`;
+    case 'container': return `container "${d.name}"`;
+    case 'layout': return `layout ${d.spaces?.length ?? 0} spaces`;
+    default: return record.kind;
+  }
+}
+
+// --- Tokens ---
+
+function loadTokens() {
+  try {
+    if (existsSync(TOKEN_FILE)) {
+      return JSON.parse(readFileSync(TOKEN_FILE, 'utf-8'));
+    }
+  } catch (e) {
+    console.error('Corrupt token file, resetting:', e.message);
+  }
+  return {};
+}
+
 const tokens = loadTokens();
 
 function generateToken() {
@@ -149,10 +203,87 @@ function authenticateToken(token) {
   return tokens[hashToken(token)] !== undefined;
 }
 
-const wss = new WebSocketServer({ port: PORT, maxPayload: 4 * 1024 * 1024 });
+// --- Record operations ---
+
+function recordsPayload() {
+  return Object.entries(state.records).map(([id, rec]) => ({ id, kind: rec.kind, data: rec.data }));
+}
+
+/**
+ * Applies a put_records message. Idempotent per record: a payload whose
+ * digest equals the stored one is a no-op (no seq bump, no broadcast) so
+ * ack-lost re-uploads never echo through the fleet.
+ */
+function applyPut(msg, deviceId) {
+  const changed = [];
+  const removed = [];
+  const accepted = [];
+  const rejected = [];
+
+  for (const record of msg.records || []) {
+    const problem = validateRecord(record);
+    if (problem) {
+      rejected.push({ id: record?.id ?? '?', problem });
+      continue;
+    }
+    accepted.push(record.id);
+    const digest = recordDigest(record.kind, record.data);
+    const existing = state.records[record.id];
+    if (existing && existing.digest === digest) {
+      continue; // no-op re-upload
+    }
+    state.version++;
+    state.records[record.id] = {
+      kind: record.kind,
+      data: record.data,
+      digest,
+      seq: state.version,
+      deviceId,
+      lastModified: Date.now(),
+    };
+    // An update after a deletion recreates the record (last writer wins).
+    delete state.tombstones[record.id];
+    changed.push({ id: record.id, kind: record.kind, data: record.data });
+  }
+
+  const upsertedIds = new Set(changed.map(r => r.id));
+  const deleteRecord = (id) => {
+    state.version++;
+    delete state.records[id];
+    state.tombstones[id] = { seq: state.version, deletedAt: Date.now() };
+    removed.push(id);
+  };
+
+  for (const id of msg.deleted || []) {
+    if (typeof id !== 'string' || !id || id === 'layout') continue;
+    accepted.push(id);
+    if (!state.records[id]) continue;
+    const wasSpace = state.records[id].kind === 'space';
+    deleteRecord(id);
+    if (wasSpace) {
+      // Cascade: a racing update can otherwise durably orphan records that
+      // reference the deleted space (deleting locally closes owned tabs, so
+      // the deleting client's tombstones normally cover these — this is the
+      // race repair). Records upserted in the SAME message keep their new
+      // placement.
+      for (const [rid, rec] of Object.entries(state.records)) {
+        if (!upsertedIds.has(rid) && rec.data?.workspaceUuid === id) {
+          deleteRecord(rid);
+        }
+      }
+    }
+  }
+
+  return { changed, removed, accepted, rejected };
+}
+
+// --- WebSocket server ---
+
+const wss = new WebSocketServer({ port: PORT, maxPayload: 16 * 1024 * 1024 });
 const clients = new Map();
 
 console.log(`Zen Sidebar Sync server listening on ws://0.0.0.0:${PORT} (schema v${SCHEMA_VERSION})`);
+logState('startup');
 
 wss.on('connection', (ws) => {
   let authenticated = false;
@@ -182,7 +313,9 @@ wss.on('connection', (ws) => {
           type: 'auth_ok',
           deviceId,
           schemaVersion: SCHEMA_VERSION,
-          state,
+          generation: state.generation,
+          version: state.version,
+          records: recordsPayload(),
           connectedDevices: Array.from(clients.values()).map(c => c.name),
         }));
 
@@ -201,88 +334,131 @@ wss.on('connection', (ws) => {
 
     try {
       switch (msg.type) {
-        case 'full_state': {
-          if (!isValidV2State(msg.state)) {
-            ws.send(JSON.stringify({ type: 'error', message: `Invalid state structure (expected schemaVersion ${SCHEMA_VERSION})` }));
+        case 'put_records': {
+          const putCount = (msg.records || []).length;
+          // Mass-removal guard: second line of defense behind the client
+          // capture guard. Only deletions that would actually remove an
+          // existing record count — an ack-lost replay of an already-applied
+          // deletion batch must pass, not wedge sync forever. The client can
+          // re-send with force after explicit user confirmation.
+          const effectiveDel = (msg.deleted || []).filter(id => state.records[id]).length;
+          const currentCount = Object.keys(state.records).length;
+          if (!msg.force && currentCount > 30 && effectiveDel > currentCount * 0.9) {
+            console.warn(`[${deviceId}] REJECTED put_records: ${effectiveDel}/${currentCount} deletions (>90%)`);
+            ws.send(JSON.stringify({
+              type: 'put_rejected',
+              reqId: msg.reqId,
+              reason: 'mass_delete',
+              wouldDelete: effectiveDel,
+              current: currentCount,
+            }));
             break;
           }
-          if (msg.replace) {
-            // Force-push: caller asserts authority. Replace server state outright.
-            state = {
-              schemaVersion: SCHEMA_VERSION,
-              workspaces: msg.state.workspaces,
-              folders: msg.state.folders,
-              tabs: msg.state.tabs,
+          const delCount = (msg.deleted || []).length;
+
+          const result = applyPut(msg, deviceId);
+          console.log(`[${deviceId}] ← put_records (${putCount} records, ${delCount} deleted)`);
+          for (const rec of result.changed) console.log(`  upsert ${describeRecord(rec)}`);
+          for (const id of result.removed) console.log(`  delete ${id}`);
+          for (const rej of result.rejected) console.warn(`  rejected ${rej.id}: ${rej.problem}`);
+
+          if (result.changed.length || result.removed.length) {
+            state.lastModified = Date.now();
+            scheduleSave();
+            logState('after put_records');
+          }
+
+          ws.send(JSON.stringify({
+            type: 'records_accepted',
+            reqId: msg.reqId,
+            ids: result.accepted,
+            rejected: result.rejected,
+            version: state.version,
+          }));
+          if (result.changed.length || result.removed.length) {
+            broadcast(ws, {
+              type: 'records_update',
+              records: result.changed,
+              deleted: result.removed,
               version: state.version,
-              lastModified: Date.now(),
-            };
-            console.log(`[${msg.deviceId || deviceId}] ← full_state REPLACE`);
-          } else {
-            state = mergeState(state, msg.state);
-            console.log(`[${msg.deviceId || deviceId}] ← full_state MERGE`);
+              sourceDevice: deviceId,
+            });
           }
-          state.version++;
-          state.lastModified = Date.now();
-          scheduleSave();
-          logState('after full_state');
-
-          ws.send(JSON.stringify({ type: 'state_accepted', version: state.version }));
-          broadcast(ws, { type: 'state_update', state, sourceDevice: deviceId });
-          break;
-        }
-
-        case 'patch': {
-          if (!Array.isArray(msg.patch?.operations)) {
-            ws.send(JSON.stringify({ type: 'error', message: 'Invalid patch structure' }));
-            break;
-          }
-          // Mass-removal guard: catches catastrophically corrupted captures
-          // (client bug returning no tabs at all). Tuned very loose so a real
-          // user mass-close operation passes through; client-side capture
-          // guard is the first line of defense.
-          const removals = countRemovals(msg.patch, state);
-          const current = countStateItems(state);
-          if (current > 30 && removals > current * 0.9) {
-            console.warn(`[${deviceId}] REJECTED patch: ${removals}/${current} removals (>90%)`);
-            for (const op of msg.patch.operations) console.warn(`  ${logPatchOp(op)}`);
-            ws.send(JSON.stringify({ type: 'error', message: 'Patch rejected: too many removals' }));
-            break;
-          }
-          console.log(`[${deviceId}] ← patch (${msg.patch.operations.length} ops)`);
-          for (const op of msg.patch.operations) console.log(`  ${logPatchOp(op)}`);
-
-          applyPatch(state, msg.patch);
-          state.version++;
-          state.lastModified = Date.now();
-          scheduleSave();
-          logState('after patch');
-
-          ws.send(JSON.stringify({ type: 'patch_accepted', version: state.version }));
-          broadcast(ws, { type: 'patch', patch: msg.patch, version: state.version, sourceDevice: deviceId });
           break;
         }
 
         case 'request_state': {
-          ws.send(JSON.stringify({ type: 'state_update', state, sourceDevice: 'server' }));
+          ws.send(JSON.stringify({
+            type: 'state_records',
+            generation: state.generation,
+            version: state.version,
+            records: recordsPayload(),
+          }));
+          break;
+        }
+
+        case 'replace_state': {
+          // Initial "Push local": caller asserts authority. Compare-and-swap
+          // on version so two devices choosing "push local" within seconds
+          // can't silently clobber each other — the loser re-prompts.
+          if (typeof msg.baseVersion === 'number' && msg.baseVersion !== state.version) {
+            console.warn(`[${deviceId}] replace_state CONFLICT (base ${msg.baseVersion} != v${state.version})`);
+            ws.send(JSON.stringify({
+              type: 'replace_conflict',
+              version: state.version,
+              counts: countsByKind(),
+            }));
+            break;
+          }
+          const incoming = [];
+          for (const record of msg.records || []) {
+            const problem = validateRecord(record);
+            if (problem) {
+              console.warn(`  replace_state rejected record ${record?.id}: ${problem}`);
+              continue;
+            }
+            incoming.push(record);
+          }
+          state.records = {};
+          state.tombstones = {};
+          for (const record of incoming) {
+            state.version++;
+            state.records[record.id] = {
+              kind: record.kind,
+              data: record.data,
+              digest: recordDigest(record.kind, record.data),
+              seq: state.version,
+              deviceId,
+              lastModified: Date.now(),
+            };
+          }
+          state.lastModified = Date.now();
+          scheduleSave();
+          console.log(`[${deviceId}] ← replace_state (${incoming.length} records)`);
+          logState('after replace_state');
+
+          ws.send(JSON.stringify({
+            type: 'replace_accepted',
+            ids: incoming.map(r => r.id),
+            generation: state.generation,
+            version: state.version,
+          }));
+          broadcast(ws, {
+            type: 'state_records',
+            generation: state.generation,
+            version: state.version,
+            records: recordsPayload(),
+            sourceDevice: deviceId,
+          });
           break;
         }
 
         case 'admin_reset_state': {
-          // Wipe the server state AND force every connected device off.
-          // Without the force-disable, the admin client's normal capture
-          // loop would emit patches for its local tabs seconds later and
-          // re-populate the server, making the reset look like it did
-          // nothing. Forcing everyone off means the next person to
-          // re-enable sync re-seeds the server from scratch (and
-          // subsequent devices hit the initial-sync confirm prompt).
-          state = {
-            schemaVersion: SCHEMA_VERSION,
-            workspaces: [],
-            folders: [],
-            tabs: [],
-            version: 0,
-            lastModified: Date.now(),
-          };
+          // Wipe the server state (NEW generation — clients must re-run the
+          // initial-sync direction prompt) AND force every connected device
+          // off, so the admin client's own capture loop can't silently
+          // repopulate the state seconds later.
+          state = emptyState();
           scheduleSave();
           console.log(`[${deviceId}] ADMIN reset state (force-disable all)`);
           ws.send(JSON.stringify({ type: 'admin_ok', action: 'reset_state' }));
@@ -294,8 +470,6 @@ wss.on('connection', (ws) => {
         }
 
         case 'admin_disable_all': {
-          // Tell every connected device (including sender) to disable sync.
-          // Each client will turn off syncEnabled in storage and disconnect.
           console.log(`[${deviceId}] ADMIN disable all`);
           const data = JSON.stringify({ type: 'force_disable', reason: 'admin' });
           for (const [client] of clients) {
@@ -352,175 +526,4 @@ function broadcast(sender, msg) {
       ws.send(data);
     }
   }
-}
-
-function isValidV2State(s) {
-  if (!s
-    || s.schemaVersion !== SCHEMA_VERSION
-    || !Array.isArray(s.workspaces)
-    || !Array.isArray(s.folders)
-    || !Array.isArray(s.tabs)) {
-    return false;
-  }
-  // Referential integrity: every non-essential tab's workspaceSyncId
-  // MUST resolve to a workspace in the same payload. A tab with an
-  // unresolvable workspaceSyncId cannot be placed by any client
-  // (`tabMonitor.workspaceUuidBySyncId.get(...)` returns undefined),
-  // so the client falls back to creating the tab in its currently
-  // active workspace — the "all tabs dump into current space" bug.
-  // Reject the whole payload so the publisher fixes its capture.
-  const wsIds = new Set(s.workspaces.map(w => w?.syncId).filter(Boolean));
-  for (const t of s.tabs) {
-    if (t?.kind === 'essential') continue;
-    if (!t?.workspaceSyncId || !wsIds.has(t.workspaceSyncId)) {
-      console.warn(`[validate] tab ${t?.syncId} kind=${t?.kind} has dangling workspaceSyncId=${t?.workspaceSyncId}`);
-      return false;
-    }
-  }
-  return true;
-}
-
-function mergeBySyncId(serverItems, clientItems) {
-  const merged = new Map();
-  for (const item of (serverItems || [])) {
-    if (item?.syncId) merged.set(item.syncId, item);
-  }
-  for (const item of (clientItems || [])) {
-    if (!item?.syncId) continue;
-    const existing = merged.get(item.syncId);
-    if (!existing) {
-      merged.set(item.syncId, item);
-    } else if ((item.lastModified || 0) >= (existing.lastModified || 0)) {
-      merged.set(item.syncId, item);
-    }
-  }
-  return Array.from(merged.values());
-}
-
-// Stable sort: primary by position, secondary by syncId so equal
-// positions don't reorder across requests / server restarts. Without
-// the tiebreaker, two clients could end up with different final
-// orderings even after seeing the same data.
-function stableSort(items) {
-  return items.slice().sort((a, b) => {
-    const dp = (a.position ?? 0) - (b.position ?? 0);
-    if (dp !== 0) return dp;
-    const sa = a.syncId || '';
-    const sb = b.syncId || '';
-    return sa < sb ? -1 : sa > sb ? 1 : 0;
-  });
-}
-
-function mergeState(server, client) {
-  return {
-    schemaVersion: SCHEMA_VERSION,
-    workspaces: stableSort(mergeBySyncId(server.workspaces, client.workspaces)),
-    folders: stableSort(mergeBySyncId(server.folders, client.folders)),
-    tabs: stableSort(mergeBySyncId(server.tabs, client.tabs)),
-    version: server.version,
-    lastModified: Date.now(),
-  };
-}
-
-function applyPatch(state, patch) {
-  const now = Date.now();
-  for (const op of patch.operations) {
-    switch (op.type) {
-      case 'add_workspace':
-        if (op.workspace?.syncId && !state.workspaces.some(w => w.syncId === op.workspace.syncId)) {
-          state.workspaces.push({ ...op.workspace, lastModified: now });
-        }
-        break;
-
-      case 'remove_workspace':
-        state.workspaces = state.workspaces.filter(w => w.syncId !== op.syncId);
-        // Cascade: drop folders + tabs anchored to this workspace
-        state.folders = state.folders.filter(f => f.workspaceSyncId !== op.syncId);
-        state.tabs = state.tabs.filter(t => t.workspaceSyncId !== op.syncId);
-        break;
-
-      case 'update_workspace': {
-        const ws = state.workspaces.find(w => w.syncId === op.syncId);
-        if (ws && op.changes) {
-          Object.assign(ws, pick(op.changes, WS_PROPS));
-          ws.lastModified = now;
-        }
-        break;
-      }
-
-      case 'add_folder':
-        if (op.folder?.syncId && !state.folders.some(f => f.syncId === op.folder.syncId)) {
-          state.folders.push({ ...op.folder, lastModified: now });
-        }
-        break;
-
-      case 'remove_folder':
-        state.folders = state.folders.filter(f => f.syncId !== op.syncId);
-        // Tabs that referenced this folder become folder-less but stay pinned in their workspace
-        for (const t of state.tabs) {
-          if (t.folderSyncId === op.syncId) {
-            t.folderSyncId = null;
-            t.lastModified = now;
-          }
-        }
-        break;
-
-      case 'update_folder': {
-        const f = state.folders.find(x => x.syncId === op.syncId);
-        if (f && op.changes) {
-          Object.assign(f, pick(op.changes, FOLDER_PROPS));
-          f.lastModified = now;
-        }
-        break;
-      }
-
-      case 'add_tab':
-        if (op.tab?.syncId && !state.tabs.some(t => t.syncId === op.tab.syncId)) {
-          // Same referential-integrity guard as isValidV2State: a non-
-          // essential tab without a known workspaceSyncId would land on
-          // every subscriber's active workspace. Reject the op instead.
-          if (op.tab.kind !== 'essential') {
-            const wsExists = state.workspaces.some(w => w.syncId === op.tab.workspaceSyncId);
-            if (!op.tab.workspaceSyncId || !wsExists) {
-              console.warn(`[patch] dropping add_tab ${op.tab.syncId} — dangling workspaceSyncId=${op.tab.workspaceSyncId}`);
-              break;
-            }
-          }
-          state.tabs.push({ ...op.tab, lastModified: now });
-        }
-        break;
-
-      case 'remove_tab':
-        state.tabs = state.tabs.filter(t => t.syncId !== op.syncId);
-        break;
-
-      case 'update_tab': {
-        const t = state.tabs.find(x => x.syncId === op.syncId);
-        if (t && op.changes) {
-          // If the update would change workspaceSyncId, ensure target
-          // workspace exists. Silently dropping a workspace move leaves
-          // the tab anchored to a stale workspace; rejecting the update
-          // is preferable to corrupting the state.
-          if (op.changes.workspaceSyncId !== undefined
-              && op.changes.workspaceSyncId !== null
-              && !state.workspaces.some(w => w.syncId === op.changes.workspaceSyncId)) {
-            console.warn(`[patch] dropping update_tab ${op.syncId} — would set dangling workspaceSyncId=${op.changes.workspaceSyncId}`);
-            break;
-          }
-          Object.assign(t, pick(op.changes, TAB_PROPS));
-          t.lastModified = now;
-        }
-        break;
-      }
-
-      default:
-        // Unknown op type — log so a client/schema mismatch is visible
-        // rather than silently dropped.
-        console.warn(`[patch] unknown op type: ${op.type}`);
-        break;
-    }
-  }
-  state.workspaces = stableSort(state.workspaces);
-  state.folders = stableSort(state.folders);
-  state.tabs = stableSort(state.tabs);
 }

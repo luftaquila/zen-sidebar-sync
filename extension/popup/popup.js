@@ -25,15 +25,21 @@ async function init() {
   const status = await browser.runtime.sendMessage({ type: 'get_status' });
   updateUI(status);
 
-  // If the background had a pending initial-sync prompt at popup-open time.
   if (status?.pendingInitialInfo) {
     renderInitialSyncPrompt(status.pendingInitialInfo);
+  }
+  if (status?.pendingGuardInfo) {
+    renderGuardPrompt(status.pendingGuardInfo);
   }
 
   browser.runtime.onMessage.addListener((msg) => {
     if (msg.type === 'status_update') {
       if (msg.status === 'awaiting_initial_confirm' && msg.initialSyncInfo) {
         renderInitialSyncPrompt(msg.initialSyncInfo);
+        return;
+      }
+      if (msg.status === 'apply_guard' && msg.guardInfo) {
+        renderGuardPrompt(msg.guardInfo);
         return;
       }
       updateStatus(msg.status, msg);
@@ -51,6 +57,8 @@ async function init() {
   $('#confirmReplaceBtn').addEventListener('click', confirmInitialReplace);
   $('#confirmPushBtn').addEventListener('click', confirmInitialPush);
   $('#cancelInitialBtn').addEventListener('click', cancelInitialSync);
+  $('#confirmGuardBtn').addEventListener('click', confirmApplyGuard);
+  $('#rejectGuardBtn').addEventListener('click', rejectApplyGuard);
   $('#adminDisableAllBtn').addEventListener('click', adminDisableAll);
   $('#adminResetStateBtn').addEventListener('click', adminResetState);
 
@@ -59,9 +67,7 @@ async function init() {
   }
 }
 
-// Promise-based custom confirm. Resolves true on OK, false on Cancel / Esc /
-// backdrop click. Used in place of window.confirm() so the destructive
-// prompts match popup styling and aren't subject to browser modal quirks.
+// Promise-based custom confirm (styled, unaffected by modal policies).
 function customConfirm(message, { okText = 'OK', okClass = 'primary' } = {}) {
   return new Promise((resolve) => {
     const overlay = $('#confirmOverlay');
@@ -92,6 +98,8 @@ function customConfirm(message, { okText = 'OK', okClass = 'primary' } = {}) {
   });
 }
 
+// --- Initial sync prompt ---
+
 async function confirmInitialReplace() {
   if (!(await customConfirm('Replace LOCAL tabs and workspaces with the server\'s state?', { okText: 'Replace local', okClass: 'danger' }))) return;
   const btn = $('#confirmReplaceBtn');
@@ -102,7 +110,7 @@ async function confirmInitialReplace() {
 }
 
 async function confirmInitialPush() {
-  if (!(await customConfirm('Overwrite SERVER state with this device\'s local? Other connected devices will see the replaced state.', { okText: 'Push local', okClass: 'danger' }))) return;
+  if (!(await customConfirm('Overwrite SERVER state with this device\'s local? Other connected devices will conform to the replaced state.', { okText: 'Push local', okClass: 'danger' }))) return;
   const btn = $('#confirmPushBtn');
   btn.disabled = true; btn.textContent = 'Pushing…';
   await browser.runtime.sendMessage({ type: 'confirm_initial_push' });
@@ -122,7 +130,7 @@ function renderInitialSyncPrompt(info) {
   const intro = $('#initialSyncIntro');
   intro.textContent = info.serverEmpty
     ? 'Server is empty. Push this device\'s state as the seed, or wait for another device.'
-    : 'Server has data from another device. Pick which side wins:';
+    : 'Server has data from another device (or was reset). Pick which side wins:';
   const ul = $('#initialSyncSummary');
   ul.innerHTML = '';
   const serverLine = document.createElement('li');
@@ -131,9 +139,33 @@ function renderInitialSyncPrompt(info) {
   const localLine = document.createElement('li');
   localLine.innerHTML = `<strong>This device:</strong> ${info.localWorkspaces} workspaces · ${info.localTabs} tabs`;
   ul.appendChild(localLine);
-  // Hide "Replace local" button if server is empty (nothing to apply).
   $('#confirmReplaceBtn').style.display = info.serverEmpty ? 'none' : '';
   sec.classList.remove('hidden');
+}
+
+// --- Apply guard prompt ---
+
+function renderGuardPrompt(guard) {
+  const sec = $('#guardPrompt');
+  if (!guard) { sec.classList.add('hidden'); return; }
+  $('#guardText').textContent =
+    `An incoming update wants to delete ${guard.wouldDelete} of your ${guard.localCount} synced items. ` +
+    'Apply the deletions, or stop syncing on this device?';
+  sec.classList.remove('hidden');
+}
+
+async function confirmApplyGuard() {
+  const btn = $('#confirmGuardBtn');
+  btn.disabled = true; btn.textContent = 'Applying…';
+  await browser.runtime.sendMessage({ type: 'confirm_apply_guard' });
+  $('#guardPrompt').classList.add('hidden');
+  btn.disabled = false; btn.textContent = 'Apply deletions';
+}
+
+async function rejectApplyGuard() {
+  await browser.runtime.sendMessage({ type: 'reject_apply_guard' });
+  $('#guardPrompt').classList.add('hidden');
+  syncToggle.checked = false;
 }
 
 // --- Actions ---
@@ -160,7 +192,6 @@ async function onToggleChange() {
     });
   } else {
     await browser.runtime.sendMessage({ type: 'disconnect' });
-    infoSection.classList.add('hidden');
     updateStatus('disconnected');
   }
 }
@@ -170,31 +201,25 @@ async function onConfigChange() {
   const token = $('#syncToken').value.trim();
   const deviceName = $('#deviceName').value.trim();
 
-  // Only save + reconnect if something actually changed
   if (serverUrl === savedConfig.serverUrl && token === savedConfig.syncToken && deviceName === savedConfig.deviceName) {
     return;
   }
 
   savedConfig = { serverUrl, syncToken: token, deviceName };
 
-  await browser.runtime.sendMessage({
-    type: 'save_config',
-    serverUrl,
-    token,
-    deviceName,
-  });
+  await browser.runtime.sendMessage({ type: 'save_config', serverUrl, token, deviceName });
 
   if (syncToggle.checked && serverUrl && token) {
-    await browser.runtime.sendMessage({
-      type: 'connect',
-      serverUrl,
-      token,
-      deviceName,
-    });
+    await browser.runtime.sendMessage({ type: 'connect', serverUrl, token, deviceName });
   }
 }
 
 async function forcePush() {
+  const ok = await customConfirm(
+    'Overwrite SERVER state with this device\'s local state? All other devices will conform.',
+    { okText: 'Force push', okClass: 'danger' },
+  );
+  if (!ok) return;
   const result = await browser.runtime.sendMessage({ type: 'force_push' });
   if (result.success) {
     $('#forcePushBtn').textContent = 'Pushed!';
@@ -207,6 +232,14 @@ async function forcePull() {
   if (result.success) {
     $('#forcePullBtn').textContent = 'Pulled!';
     setTimeout(() => { $('#forcePullBtn').textContent = 'Force Pull'; }, 1500);
+  }
+}
+
+async function disableSpacesEngine() {
+  const result = await browser.runtime.sendMessage({ type: 'disable_spaces_engine' });
+  if (result?.success) {
+    const status = await browser.runtime.sendMessage({ type: 'get_status' });
+    updateUI(status);
   }
 }
 
@@ -256,15 +289,8 @@ function updateUI(status) {
   updateStatus(status.syncStatus, status);
   syncToggle.checked = status.syncEnabled;
 
-  // Persistent errors override the sync-status badge for banner rendering.
-  if (status.nativeMissing) renderBanner('native_missing', status);
-  else if (status.schemaError) renderBanner('schema_mismatch', status);
-
-  // Always show stats — they reflect the local tabMonitor capture and are
-  // meaningful regardless of sync state. Hide-on-disconnect made the popup
-  // look empty/broken when sync was off or reconnecting.
   infoSection.classList.remove('hidden');
-  updateStats(status.state);
+  updateStats(status.counts);
   if (status.lastSyncTime) {
     lastSyncTimestamp = status.lastSyncTime;
     updateLastSync(status.lastSyncTime);
@@ -284,18 +310,20 @@ function updateStatus(status, ctx = {}) {
     auth_failed: 'Auth Failed',
     failed: 'Failed',
     schema_mismatch: 'Schema mismatch',
-    native_missing: 'Native host missing',
+    spaces_engine_conflict: 'Zen sync conflict',
+    incompatible_zen: 'Incompatible Zen',
+    awaiting_initial_confirm: 'Awaiting confirmation',
+    apply_guard: 'Held for confirmation',
   };
 
   statusText.textContent = labels[status] || status;
   renderBanner(status, ctx);
 
-  // Always refresh stats on status change.
   browser.runtime.sendMessage({ type: 'get_status' }).then(s => {
-    if (s) updateStats(s.state);
+    if (s) updateStats(s.counts);
   });
 
-  if (status === 'auth_failed' || status === 'failed' || status === 'schema_mismatch' || status === 'native_missing') {
+  if (status === 'auth_failed' || status === 'failed' || status === 'schema_mismatch' || status === 'incompatible_zen') {
     syncToggle.checked = false;
   }
 }
@@ -308,35 +336,46 @@ function renderBanner(status, ctx) {
     host.style.cssText = 'padding:8px;margin:8px;border-radius:6px;font-size:12px;display:none;';
     document.querySelector('.container')?.insertBefore(host, document.querySelector('.container')?.firstChild);
   }
+  host.textContent = '';
   if (status === 'schema_mismatch') {
     host.style.display = 'block';
     host.style.background = '#fde7e7';
     host.style.color = '#900';
-    host.textContent = ctx.schemaError || 'Server schema is incompatible. Reset server state.';
-  } else if (status === 'native_missing') {
+    host.textContent = ctx.schemaError || 'Server schema is incompatible. Update all clients or reset server state.';
+  } else if (status === 'spaces_engine_conflict') {
     host.style.display = 'block';
     host.style.background = '#fff4d6';
     host.style.color = '#7a4f00';
-    host.textContent = 'Native messaging host not installed. Install it before enabling sync to avoid creating duplicate tabs.';
+    const text = document.createElement('div');
+    text.textContent = 'Zen\'s built-in Spaces sync (Mozilla account) is enabled. Running both syncs corrupts state.';
+    const btn = document.createElement('button');
+    btn.textContent = 'Disable Zen\'s Spaces sync';
+    btn.className = 'btn danger';
+    btn.style.marginTop = '6px';
+    btn.addEventListener('click', disableSpacesEngine);
+    host.appendChild(text);
+    host.appendChild(btn);
+  } else if (status === 'incompatible_zen') {
+    host.style.display = 'block';
+    host.style.background = '#fde7e7';
+    host.style.color = '#900';
+    const missing = ctx.engineEnv?.missing?.filter(m => !m.includes('(optional)')) || [];
+    host.textContent = `This Zen version is missing internals the sync engine needs${missing.length ? `: ${missing.join(', ')}` : '.'} Sync is disabled to protect your data.`;
   } else {
     host.style.display = 'none';
   }
 }
 
-function updateStats(state) {
-  if (!state || !Array.isArray(state.tabs)) {
+function updateStats(counts) {
+  if (!counts) {
     $('#essentialCount').textContent = '-';
     $('#workspaceCount').textContent = '-';
     $('#tabCount').textContent = '-';
     return;
   }
-  const tabs = state.tabs;
-  const essentials = tabs.filter(t => t.kind === 'essential').length;
-  // "Tabs" excludes essentials so the three numbers don't double-count.
-  const nonEssential = tabs.length - essentials;
-  $('#essentialCount').textContent = essentials;
-  $('#workspaceCount').textContent = (state.workspaces || []).length;
-  $('#tabCount').textContent = nonEssential;
+  $('#essentialCount').textContent = counts.essentials ?? 0;
+  $('#workspaceCount').textContent = counts.spaces ?? 0;
+  $('#tabCount').textContent = (counts.pinned ?? 0) + (counts.normal ?? 0);
 }
 
 function updateLastSync(timestamp) {

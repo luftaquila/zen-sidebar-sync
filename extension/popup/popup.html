@@ -79,6 +79,18 @@
       </div>
     </section>
 
+    <!-- Apply-guard confirmation prompt -->
+    <section id="guardPrompt" class="section hidden initial-sync-prompt">
+      <h2>Large deletion held</h2>
+      <p class="prompt-text">
+        <span id="guardText"></span>
+      </p>
+      <div class="actions actions-stacked">
+        <button id="confirmGuardBtn" class="btn danger">Apply deletions</button>
+        <button id="rejectGuardBtn" class="btn secondary">Stop syncing here</button>
+      </div>
+    </section>
+
     <!-- Connected Info -->
     <section id="infoSection" class="section hidden">
       <div class="stats">

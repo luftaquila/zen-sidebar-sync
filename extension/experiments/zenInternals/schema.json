@@ -1,345 +1,177 @@
 [
   {
     "namespace": "zenInternals",
-    "description": "Access Zen Browser internal APIs for workspace/folder/tab management",
+    "description": "Chrome-side sync engine for Zen Browser sidebar state (capture, digest diff, apply).",
+    "types": [
+      {
+        "id": "SyncRecord",
+        "type": "object",
+        "description": "One sync record: id is Zen's native id (tab zenSyncId / folder DOM id / space uuid / split groupId / container guid / 'layout').",
+        "properties": {
+          "id": { "type": "string" },
+          "kind": { "type": "string" },
+          "data": { "type": "object", "additionalProperties": { "type": "any" } }
+        }
+      }
+    ],
     "functions": [
       {
-        "name": "createWorkspace",
+        "name": "start",
         "type": "function",
         "async": true,
-        "parameters": [
-          {
-            "name": "options",
-            "type": "object",
-            "properties": {
-              "name": { "type": "string" },
-              "icon": { "type": "string", "optional": true },
-              "theme": { "type": "any", "optional": true }
-            }
-          }
-        ]
-      },
-      {
-        "name": "renameWorkspace",
-        "type": "function",
-        "async": true,
-        "parameters": [
-          {
-            "name": "options",
-            "type": "object",
-            "properties": {
-              "uuid": { "type": "string" },
-              "name": { "type": "string", "optional": true },
-              "icon": { "type": "string", "optional": true },
-              "theme": { "type": "any", "optional": true }
-            }
-          }
-        ]
-      },
-      {
-        "name": "deleteWorkspace",
-        "type": "function",
-        "async": true,
-        "parameters": [
-          {
-            "name": "options",
-            "type": "object",
-            "properties": {
-              "uuid": { "type": "string" }
-            }
-          }
-        ]
-      },
-      {
-        "name": "getWorkspaces",
-        "type": "function",
-        "async": true,
+        "description": "Initializes the engine (event listeners, capture scheduler) and returns the environment.",
         "parameters": []
       },
       {
-        "name": "listLiveUrls",
+        "name": "stop",
         "type": "function",
         "async": true,
+        "description": "Stops event listeners and capture scheduling.",
         "parameters": []
       },
       {
-        "name": "getRuntimeState",
+        "name": "getEnvironment",
         "type": "function",
         "async": true,
+        "description": "Returns { spacesEngineEnabled, fxaConfigured, zenVersion, compatible, missing, ready, guardSuppressed }.",
         "parameters": []
       },
       {
-        "name": "setTabSyncUuid",
+        "name": "setSpacesEnginePref",
         "type": "function",
         "async": true,
+        "description": "Sets services.sync.engine.spaces (Zen's native FxA spaces sync engine).",
+        "parameters": [{ "name": "enabled", "type": "boolean" }]
+      },
+      {
+        "name": "getFullProjection",
+        "type": "function",
+        "async": true,
+        "description": "Returns every current record as [{id, kind, data}].",
+        "parameters": []
+      },
+      {
+        "name": "computeLocalChanges",
+        "type": "function",
+        "async": true,
+        "description": "Diff of current projections vs the uploaded baseline: { changed: [SyncRecord], deleted: [ids] }.",
+        "parameters": []
+      },
+      {
+        "name": "forceCapture",
+        "type": "function",
+        "async": true,
+        "description": "Forces a fresh session collection (and with it a diff pass).",
+        "parameters": []
+      },
+      {
+        "name": "getCounts",
+        "type": "function",
+        "async": true,
+        "description": "Record counts for the popup: { spaces, folders, essentials, pinned, normal, splits }.",
+        "parameters": []
+      },
+      {
+        "name": "applyRecords",
+        "type": "function",
+        "async": true,
+        "description": "Applies incoming records/deletions to the live browser. Returns { failed: [ids], guard }.",
         "parameters": [
           {
             "name": "options",
             "type": "object",
             "properties": {
-              "tabId": { "type": "integer" },
-              "syncUuid": { "type": "string" }
+              "records": { "type": "array", "optional": true, "items": { "$ref": "SyncRecord" } },
+              "deleted": { "type": "array", "optional": true, "items": { "type": "string" } },
+              "reconcile": {
+                "type": "boolean",
+                "optional": true,
+                "description": "Initial 'Replace local': also delete local synced items absent from the incoming set."
+              },
+              "overrideGuard": {
+                "type": "boolean",
+                "optional": true,
+                "description": "Bypass the apply-side mass-deletion guard (only after explicit user confirmation)."
+              }
             }
           }
         ]
       },
       {
-        "name": "findTabIdBySyncUuid",
+        "name": "reconnectMerge",
         "type": "function",
         "async": true,
+        "description": "Applies the server's full record set while preserving offline changes/deletions. Returns { failed, guard }.",
         "parameters": [
           {
             "name": "options",
             "type": "object",
             "properties": {
-              "syncUuid": { "type": "string" }
+              "records": { "type": "array", "optional": true, "items": { "$ref": "SyncRecord" } },
+              "overrideGuard": { "type": "boolean", "optional": true }
             }
           }
         ]
       },
       {
-        "name": "reorderTabsInPlace",
+        "name": "markUploaded",
         "type": "function",
         "async": true,
+        "description": "Advances the uploaded baseline from the server-acknowledged SENT payload (records upserted, ids deleted).",
         "parameters": [
           {
             "name": "options",
             "type": "object",
             "properties": {
-              "orderedSyncUuids": { "type": "array", "items": { "type": "string" } }
+              "records": { "type": "array", "optional": true, "items": { "$ref": "SyncRecord" } },
+              "deleted": { "type": "array", "optional": true, "items": { "type": "string" } }
             }
           }
         ]
       },
       {
-        "name": "moveTabToWorkspace",
+        "name": "getGeneration",
         "type": "function",
         "async": true,
-        "parameters": [
-          {
-            "name": "options",
-            "type": "object",
-            "properties": {
-              "tabId": { "type": "integer", "optional": true },
-              "tabUrl": { "type": "string", "optional": true },
-              "syncUuid": { "type": "string", "optional": true },
-              "workspaceUuid": { "type": "string" }
-            }
-          }
-        ]
+        "description": "Server store generation this profile last synced against (null if never).",
+        "parameters": []
       },
       {
-        "name": "setEssential",
+        "name": "setGeneration",
         "type": "function",
         "async": true,
-        "parameters": [
-          {
-            "name": "options",
-            "type": "object",
-            "properties": {
-              "tabId": { "type": "integer", "optional": true },
-              "tabUrl": { "type": "string", "optional": true },
-              "syncUuid": { "type": "string", "optional": true },
-              "essential": { "type": "boolean" }
-            }
-          }
-        ]
+        "parameters": [{ "name": "generation", "type": "string" }]
       },
       {
-        "name": "setPinned",
+        "name": "resetBaseline",
         "type": "function",
         "async": true,
-        "parameters": [
-          {
-            "name": "options",
-            "type": "object",
-            "properties": {
-              "tabId": { "type": "integer", "optional": true },
-              "tabUrl": { "type": "string", "optional": true },
-              "syncUuid": { "type": "string", "optional": true },
-              "pinned": { "type": "boolean" }
-            }
-          }
-        ]
-      },
-      {
-        "name": "removeTab",
-        "type": "function",
-        "async": true,
-        "parameters": [
-          {
-            "name": "options",
-            "type": "object",
-            "properties": {
-              "tabId": { "type": "integer", "optional": true },
-              "tabUrl": { "type": "string", "optional": true },
-              "syncUuid": { "type": "string", "optional": true }
-            }
-          }
-        ]
-      },
-      {
-        "name": "createFolder",
-        "type": "function",
-        "async": true,
-        "parameters": [
-          {
-            "name": "options",
-            "type": "object",
-            "properties": {
-              "id": { "type": "string", "optional": true },
-              "name": { "type": "string" },
-              "collapsed": { "type": "boolean", "optional": true },
-              "userIcon": { "type": "string", "optional": true },
-              "workspaceUuid": { "type": "string", "optional": true },
-              "parentId": { "type": "string", "optional": true },
-              "tabUrls": { "type": "array", "optional": true, "items": { "type": "string" } }
-            }
-          }
-        ]
-      },
-      {
-        "name": "renameFolder",
-        "type": "function",
-        "async": true,
-        "parameters": [
-          {
-            "name": "options",
-            "type": "object",
-            "properties": {
-              "folderId": { "type": "string" },
-              "name": { "type": "string" }
-            }
-          }
-        ]
-      },
-      {
-        "name": "setFolderCollapsed",
-        "type": "function",
-        "async": true,
-        "parameters": [
-          {
-            "name": "options",
-            "type": "object",
-            "properties": {
-              "folderId": { "type": "string" },
-              "collapsed": { "type": "boolean" }
-            }
-          }
-        ]
-      },
-      {
-        "name": "setFolderUserIcon",
-        "type": "function",
-        "async": true,
-        "parameters": [
-          {
-            "name": "options",
-            "type": "object",
-            "properties": {
-              "folderId": { "type": "string" },
-              "userIcon": { "type": "string" }
-            }
-          }
-        ]
-      },
-      {
-        "name": "setFolderParent",
-        "type": "function",
-        "async": true,
-        "parameters": [
-          {
-            "name": "options",
-            "type": "object",
-            "properties": {
-              "folderId": { "type": "string" },
-              "parentId": { "type": "string", "optional": true }
-            }
-          }
-        ]
-      },
-      {
-        "name": "deleteFolder",
-        "type": "function",
-        "async": true,
-        "parameters": [
-          {
-            "name": "options",
-            "type": "object",
-            "properties": {
-              "folderId": { "type": "string" }
-            }
-          }
-        ]
-      },
-      {
-        "name": "addTabToFolder",
-        "type": "function",
-        "async": true,
-        "parameters": [
-          {
-            "name": "options",
-            "type": "object",
-            "properties": {
-              "tabId": { "type": "integer", "optional": true },
-              "tabUrl": { "type": "string", "optional": true },
-              "syncUuid": { "type": "string", "optional": true },
-              "folderId": { "type": "string" }
-            }
-          }
-        ]
-      },
-      {
-        "name": "removeTabFromFolder",
-        "type": "function",
-        "async": true,
-        "parameters": [
-          {
-            "name": "options",
-            "type": "object",
-            "properties": {
-              "tabId": { "type": "integer", "optional": true },
-              "tabUrl": { "type": "string", "optional": true },
-              "syncUuid": { "type": "string", "optional": true }
-            }
-          }
-        ]
+        "description": "Wipes the uploaded baseline (container mappings survive).",
+        "parameters": []
       },
       {
         "name": "log",
         "type": "function",
         "async": true,
+        "description": "Logs to Services.console (readable via Marionette).",
+        "parameters": [{ "name": "msg", "type": "string" }]
+      }
+    ],
+    "events": [
+      {
+        "name": "onRecordsChanged",
+        "type": "function",
+        "description": "Fired after each fresh capture whose diff is non-empty: { changed: [SyncRecord], deleted: [ids] }.",
         "parameters": [
-          { "name": "msg", "type": "string" }
+          { "name": "payload", "type": "object", "additionalProperties": { "type": "any" } }
         ]
       },
       {
-        "name": "reorderWorkspaces",
+        "name": "onEnvironmentChanged",
         "type": "function",
-        "async": true,
+        "description": "Fired when the environment changes (e.g. services.sync.engine.spaces flips).",
         "parameters": [
-          {
-            "name": "options",
-            "type": "object",
-            "properties": {
-              "orderedUuids": { "type": "array", "items": { "type": "string" } }
-            }
-          }
-        ]
-      },
-      {
-        "name": "reorderFolders",
-        "type": "function",
-        "async": true,
-        "parameters": [
-          {
-            "name": "options",
-            "type": "object",
-            "properties": {
-              "orderedFolderIds": { "type": "array", "items": { "type": "string" } },
-              "parentId": { "type": "string", "optional": true }
-            }
-          }
+          { "name": "payload", "type": "object", "additionalProperties": { "type": "any" } }
         ]
       }
     ]

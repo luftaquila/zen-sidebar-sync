@@ -1,11 +1,24 @@
 /**
- * Sync Client - WebSocket client for real-time sync with server
+ * Sync Client - WebSocket transport for the v3 record protocol.
  *
  * Handles connection, authentication, reconnection, and message routing.
+ * All sync semantics (diffing, applying, baselines) live chrome-side in the
+ * zenInternals experiment; this class only moves records.
  */
 
 class SyncClient {
-  constructor({ onStateUpdate, onPatch, onDeviceEvent, onStatusChange, onForceDisable }) {
+  constructor({
+    onAuthState,
+    onRecordsUpdate,
+    onRecordsAccepted,
+    onPutRejected,
+    onStateRecords,
+    onReplaceAccepted,
+    onReplaceConflict,
+    onDeviceEvent,
+    onStatusChange,
+    onForceDisable,
+  }) {
     this.ws = null;
     this.serverUrl = null;
     this.token = null;
@@ -17,8 +30,13 @@ class SyncClient {
     this.pingInterval = null;
     this.connected = false;
 
-    this.onStateUpdate = onStateUpdate;
-    this.onPatch = onPatch;
+    this.onAuthState = onAuthState;
+    this.onRecordsUpdate = onRecordsUpdate;
+    this.onRecordsAccepted = onRecordsAccepted;
+    this.onPutRejected = onPutRejected;
+    this.onStateRecords = onStateRecords;
+    this.onReplaceAccepted = onReplaceAccepted;
+    this.onReplaceConflict = onReplaceConflict;
     this.onDeviceEvent = onDeviceEvent;
     this.onStatusChange = onStatusChange;
     this.onForceDisable = onForceDisable;
@@ -28,9 +46,8 @@ class SyncClient {
     this.serverUrl = serverUrl;
     this.token = token;
     this.deviceName = deviceName || `Zen-${Date.now().toString(36)}`;
-    this.reconnectAttempts = 0; // [L3] Reset on manual connect
+    this.reconnectAttempts = 0;
 
-    // Load or generate device ID
     const stored = await browser.storage.local.get('deviceId');
     this.deviceId = stored.deviceId || `dev-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
     await browser.storage.local.set({ deviceId: this.deviceId });
@@ -84,7 +101,7 @@ class SyncClient {
       }
     };
 
-    this.ws.onerror = (err) => {
+    this.ws.onerror = () => {
       console.error('[SyncClient] WebSocket error');
       this.onStatusChange?.('error');
     };
@@ -98,25 +115,47 @@ class SyncClient {
         this.deviceId = msg.deviceId;
         this.onStatusChange?.('connected');
         this._startPing();
-        // Process initial state from server. Flag isAuthState=true so the
-        // orchestrator can distinguish reconnect from broadcast (offline
-        // changes must be preserved on reconnect).
-        if (msg.state) {
-          this.onStateUpdate?.(msg.state, 'server', true);
+        this.onAuthState?.({
+          schemaVersion: msg.schemaVersion,
+          generation: msg.generation,
+          version: msg.version,
+          records: msg.records || [],
+          connectedDevices: msg.connectedDevices || [],
+        });
+        break;
+
+      case 'records_update':
+        if (msg.sourceDevice !== this.deviceId) {
+          this.onRecordsUpdate?.(msg.records || [], msg.deleted || [], msg.sourceDevice, msg.version);
         }
         break;
 
-      case 'state_update':
-        this.onStateUpdate?.(msg.state, msg.sourceDevice);
+      case 'records_accepted':
+        this.onRecordsAccepted?.(msg.ids || [], msg.rejected || [], msg.version, msg.reqId);
         break;
 
-      case 'patch':
-        this.onPatch?.(msg.patch, msg.sourceDevice, msg.version);
+      case 'put_rejected':
+        this.onPutRejected?.(msg.reqId, { reason: msg.reason, wouldDelete: msg.wouldDelete, current: msg.current });
         break;
 
-      case 'state_accepted':
-      case 'patch_accepted':
-        // Server acknowledged our update
+      case 'state_records':
+        if (msg.sourceDevice && msg.sourceDevice === this.deviceId) {
+          break;
+        }
+        this.onStateRecords?.({
+          generation: msg.generation,
+          version: msg.version,
+          records: msg.records || [],
+          sourceDevice: msg.sourceDevice,
+        });
+        break;
+
+      case 'replace_accepted':
+        this.onReplaceAccepted?.(msg.ids || [], msg.generation, msg.version);
+        break;
+
+      case 'replace_conflict':
+        this.onReplaceConflict?.(msg.version, msg.counts || {});
         break;
 
       case 'device_connected':
@@ -125,18 +164,13 @@ class SyncClient {
         break;
 
       case 'pong':
-        // Latency = Date.now() - msg.timestamp (from our ping)
         break;
 
       case 'force_disable':
-        // Server (or another device acting as admin) requested all clients
-        // disable sync. Pass to orchestrator which will turn off the toggle
-        // and disconnect.
         this.onForceDisable?.(msg.reason);
         break;
 
       case 'admin_ok':
-        // Server ack of an admin action this client initiated.
         break;
 
       case 'error':
@@ -148,6 +182,35 @@ class SyncClient {
     }
   }
 
+  putRecords(records, deleted, { reqId, force } = {}) {
+    if (!this.connected) return false;
+    this.ws.send(JSON.stringify({
+      type: 'put_records',
+      records,
+      deleted,
+      reqId,
+      force: !!force,
+      deviceId: this.deviceId,
+    }));
+    return true;
+  }
+
+  requestState() {
+    if (!this.connected) return;
+    this.ws.send(JSON.stringify({ type: 'request_state' }));
+  }
+
+  replaceState(records, baseVersion) {
+    if (!this.connected) return false;
+    this.ws.send(JSON.stringify({
+      type: 'replace_state',
+      records,
+      baseVersion,
+      deviceId: this.deviceId,
+    }));
+    return true;
+  }
+
   sendAdminResetState() {
     if (!this.connected) return;
     this.ws.send(JSON.stringify({ type: 'admin_reset_state', deviceId: this.deviceId }));
@@ -156,30 +219,6 @@ class SyncClient {
   sendAdminDisableAll() {
     if (!this.connected) return;
     this.ws.send(JSON.stringify({ type: 'admin_disable_all', deviceId: this.deviceId }));
-  }
-
-  sendFullState(state, { replace = false } = {}) {
-    if (!this.connected) return;
-    this.ws.send(JSON.stringify({
-      type: 'full_state',
-      state,
-      replace,
-      deviceId: this.deviceId,
-    }));
-  }
-
-  sendPatch(patch) {
-    if (!this.connected) return;
-    this.ws.send(JSON.stringify({
-      type: 'patch',
-      patch,
-      deviceId: this.deviceId,
-    }));
-  }
-
-  requestState() {
-    if (!this.connected) return;
-    this.ws.send(JSON.stringify({ type: 'request_state' }));
   }
 
   disconnect() {
